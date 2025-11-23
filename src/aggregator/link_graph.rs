@@ -236,6 +236,16 @@ impl LinkGraph {
             let split_index = message_buffer
                 .partition_point(|(_, p)| p.timestamp < window_start_ts + cfg.time_window_seconds);
 
+            // Enforce a minimum batch size; collect more if below threshold.
+            if split_index < cfg.queue_threshold as usize {
+                println!(
+                    "[LinkGraph] [Debug] Window size {} below min threshold {}. Collecting more...",
+                    split_index, cfg.queue_threshold
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            }
+
             let messages_to_process = message_buffer.drain(..split_index).collect::<Vec<_>>();
             let (window_message_ids, window_payloads): (Vec<_>, Vec<_>) =
                 messages_to_process.into_iter().unzip();
@@ -244,6 +254,16 @@ impl LinkGraph {
             let payload_count = window_payloads.len();
             if payload_count == 0 {
                 continue;
+            }
+
+            if payload_count < 100 {
+                let queue_len_now: i64 = self.redis_conn.xlen(stream_key).await.unwrap_or(-1);
+                println!(
+                    "[LinkGraph] [Debug] Small window: {} events, buffer_remaining={}, queue_len={}",
+                    payload_count,
+                    message_buffer.len(),
+                    queue_len_now
+                );
             }
 
             let first_ts = window_payloads.first().map_or(0, |p| p.timestamp);
@@ -466,6 +486,7 @@ impl LinkGraph {
         mints: &[MintRow],
         all_trades_in_batch: &[TradeRow],
     ) -> Result<()> {
+        let start = Instant::now();
         if mints.is_empty() {
             return Ok(());
         }
@@ -490,10 +511,12 @@ impl LinkGraph {
             });
         }
         self.write_minted_links(&links, mints).await?;
+        println!("[LinkGraph] [Profile] process_mints: {} mints in {:?}", mints.len(), start.elapsed());
         Ok(())
     }
 
     async fn process_supply_locks(&self, locks: &[SupplyLockRow]) -> Result<()> {
+        let start = Instant::now();
         if locks.is_empty() {
             return Ok(());
         }
@@ -507,10 +530,12 @@ impl LinkGraph {
             })
             .collect();
         self.write_locked_supply_links(&links, locks).await?;
+        println!("[LinkGraph] [Profile] process_supply_locks: {} locks in {:?}", locks.len(), start.elapsed());
         Ok(())
     }
 
     async fn process_burns(&self, burns: &[BurnRow]) -> Result<()> {
+        let start = Instant::now();
         if burns.is_empty() {
             return Ok(());
         }
@@ -523,10 +548,12 @@ impl LinkGraph {
             })
             .collect();
         self.write_burned_links(&links, burns).await?;
+        println!("[LinkGraph] [Profile] process_burns: {} burns in {:?}", burns.len(), start.elapsed());
         Ok(())
     }
 
     async fn process_transfers_and_funding(&self, transfers: &[TransferRow]) -> Result<()> {
+        let start = Instant::now();
         if transfers.is_empty() {
             return Ok(());
         }
@@ -545,6 +572,7 @@ impl LinkGraph {
             .collect();
 
         self.write_transfer_links(&transfer_links).await?;
+        println!("[LinkGraph] [Profile] process_transfers: {} transfers in {:?}", transfers.len(), start.elapsed());
         Ok(())
     }
 
@@ -553,6 +581,7 @@ impl LinkGraph {
         trades: &[TradeRow],
         mints_in_batch: &[MintRow],
     ) -> Result<()> {
+        let start = Instant::now();
         if trades.is_empty() {
             return Ok(());
         }
@@ -594,6 +623,11 @@ impl LinkGraph {
         self.detect_and_write_whale_links(trades).await?;
         self.detect_and_write_top_trader_links(trades).await?;
 
+        println!(
+            "[LinkGraph] [Profile] process_trade_patterns: {} trades in {:?}",
+            trades.len(),
+            start.elapsed()
+        );
         Ok(())
     }
 
@@ -602,6 +636,7 @@ impl LinkGraph {
         _trades: &[TradeRow],
         creator_map: HashMap<String, String>,
     ) -> Result<()> {
+        let start = Instant::now();
         let cfg = &*LINK_GRAPH_CONFIG;
         let mut links: Vec<SnipedLink> = Vec::new();
         let mut snipers_map: HashMap<String, (String, String)> = HashMap::new();
@@ -735,6 +770,11 @@ impl LinkGraph {
         if !links.is_empty() {
             self.write_sniped_links(&links, &snipers_map).await?;
         }
+        println!(
+            "[LinkGraph] [Profile] detect_and_write_snipes: {} links in {:?}",
+            links.len(),
+            start.elapsed()
+        );
         Ok(())
     }
 
@@ -1013,6 +1053,7 @@ impl LinkGraph {
     }
 
     async fn detect_and_write_top_trader_links(&self, trades: &[TradeRow]) -> Result<()> {
+        let start = Instant::now();
         let cfg = &*LINK_GRAPH_CONFIG;
         let active_trader_pairs: Vec<(String, String)> = trades
             .iter()
@@ -1123,6 +1164,11 @@ impl LinkGraph {
             self.write_top_trader_of_links(&links).await?;
         }
 
+        println!(
+            "[LinkGraph] [Profile] detect_and_write_top_trader_links: {} links in {:?}",
+            links.len(),
+            start.elapsed()
+        );
         Ok(())
     }
 
@@ -1200,6 +1246,7 @@ impl LinkGraph {
     }
 
     async fn detect_and_write_whale_links(&self, trades: &[TradeRow]) -> Result<()> {
+        let start = Instant::now();
         let cfg = &*LINK_GRAPH_CONFIG;
         let unique_mints_in_batch: Vec<String> = trades
             .iter()
@@ -1351,6 +1398,12 @@ impl LinkGraph {
         if !links.is_empty() {
             self.write_whale_of_links(&links).await?;
         }
+
+        println!(
+            "[LinkGraph] [Profile] detect_and_write_whale_links: {} links in {:?}",
+            links.len(),
+            start.elapsed()
+        );
         Ok(())
     }
 
