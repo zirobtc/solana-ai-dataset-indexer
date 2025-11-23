@@ -12,7 +12,7 @@ use neo4rs::{query, BoltType, Graph};
 use redis::streams::{StreamReadOptions, StreamReadReply};
 use redis::FromRedisValue;
 use redis::{aio::MultiplexedConnection, AsyncCommands, Client as RedisClient};
-use crate::handlers::constants::{NATIVE_MINT, USDC_MINT, USDT_MINT, USD1_MINT};
+use crate::handlers::constants::{NATIVE_MINT, USDC_MINT, USDT_MINT, USD1_MINT, PROTOCOL_PUMPFUN_LAUNCHPAD};
 use serde::Deserialize;
 use solana_sdk::native_token::LAMPORTS_PER_SOL;
 use std::collections::{HashMap, HashSet};
@@ -23,6 +23,7 @@ use tokio::time::Instant;
 use chrono::Utc;
 use once_cell::sync::Lazy;
 use tokio::time::sleep;
+use tokio::sync::Mutex;
 
 fn decimals_for_quote(mint: &str) -> u8 {
     if mint == NATIVE_MINT {
@@ -37,6 +38,9 @@ fn decimals_for_quote(mint: &str) -> u8 {
 static LINK_GRAPH_DLQ_STREAM: Lazy<String> = Lazy::new(|| {
     std::env::var("LINK_GRAPH_DLQ_STREAM").unwrap_or_else(|_| "link_graph_dlq".to_string())
 });
+
+// Serialize Neo4j writes when multiple LinkGraph workers are running.
+static NEO4J_WRITE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 #[derive(Debug)]
 struct LinkGraphConfig {
@@ -478,8 +482,13 @@ impl LinkGraph {
         let cfg = &*LINK_GRAPH_CONFIG;
         let mut links: Vec<SnipedLink> = Vec::new();
         let mut snipers_map: HashMap<String, (String, String)> = HashMap::new(); 
+        // Limit sniper detection to Pump.fun launchpad trades only.
+        let pump_trades: Vec<&TradeRow> = _trades.iter()
+            .filter(|t| t.protocol == PROTOCOL_PUMPFUN_LAUNCHPAD)
+            .collect();
+        if pump_trades.is_empty() { return Ok(()); }
 
-        let unique_mints: HashSet<String> = _trades.iter().map(|t| t.base_address.clone()).collect();
+        let unique_mints: HashSet<String> = pump_trades.iter().map(|t| t.base_address.clone()).collect();
         if unique_mints.is_empty() { return Ok(()); }
 
         // This pre-flight check remains the same
@@ -1057,6 +1066,7 @@ impl LinkGraph {
             let q = query("UNWIND $wallets as wallet MERGE (w:Wallet {address: wallet.address})")
                 .param("wallets", params);
             
+            let _guard = NEO4J_WRITE_LOCK.lock().await;
             self.neo4j_client.run(q).await?;
         }
         Ok(())
@@ -1079,6 +1089,7 @@ impl LinkGraph {
             let q = query("UNWIND $tokens as token MERGE (t:Token {address: token.address}) ON CREATE SET t.created_ts = token.created_ts")
                 .param("tokens", params);
                 
+            let _guard = NEO4J_WRITE_LOCK.lock().await;
             self.neo4j_client.run(q).await?;
         }
         Ok(())
@@ -1100,6 +1111,7 @@ impl LinkGraph {
             ON CREATE SET r.timestamp = t.timestamp, r.signatures = t.signatures
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
         ");
+        let _guard = NEO4J_WRITE_LOCK.lock().await;
         self.neo4j_client.run(q.param("x", params)).await.map_err(|e| e.into())
     }
 
@@ -1137,6 +1149,7 @@ impl LinkGraph {
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
         ");
         
+        let _guard = NEO4J_WRITE_LOCK.lock().await;
         let result = self.neo4j_client.run(q.param("x", params)).await;
         result.map_err(|e| e.into())
     }
@@ -1175,6 +1188,7 @@ impl LinkGraph {
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
         ");
             
+        let _guard = NEO4J_WRITE_LOCK.lock().await;
         self.neo4j_client.run(q.param("x", params)).await.map_err(|e| e.into())
     }
 
@@ -1219,6 +1233,7 @@ impl LinkGraph {
                 r.f_sell_slip = t.f_sell_slip
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
         ");
+        let _guard = NEO4J_WRITE_LOCK.lock().await;
         self.neo4j_client.run(q.param("x", params)).await.map_err(|e| e.into())
     }
 
@@ -1246,6 +1261,7 @@ impl LinkGraph {
             ON CREATE SET r.timestamp = t.timestamp, r.buy_amount = t.buy_amount
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
         ");
+        let _guard = NEO4J_WRITE_LOCK.lock().await;
         self.neo4j_client.run(q.param("x", params)).await.map_err(|e| e.into())
     }
 
@@ -1274,6 +1290,7 @@ impl LinkGraph {
             ON CREATE SET r.rank = t.rank, r.sniped_amount = t.sniped_amount, r.timestamp = t.timestamp
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
         ");
+        let _guard = NEO4J_WRITE_LOCK.lock().await;
         self.neo4j_client.run(q.param("x", params)).await.map_err(|e| e.into())
     }
 
@@ -1305,6 +1322,7 @@ impl LinkGraph {
             ON CREATE SET r.amount = t.amount, r.unlock_timestamp = t.unlock_ts, r.recipient = t.recipient, r.timestamp = t.timestamp
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
         ");
+        let _guard = NEO4J_WRITE_LOCK.lock().await;
         self.neo4j_client.run(q.param("x", params)).await.map_err(|e| e.into())
     }
 
@@ -1331,6 +1349,7 @@ impl LinkGraph {
             ON CREATE SET r.amount = t.amount, r.timestamp = t.timestamp
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
         ");
+        let _guard = NEO4J_WRITE_LOCK.lock().await;
         self.neo4j_client.run(q.param("x", params)).await.map_err(|e| e.into())
     }
 
@@ -1355,6 +1374,7 @@ impl LinkGraph {
             ON CREATE SET r.pool_address = t.pool_address, r.amount_base = t.amount_base, r.amount_quote = t.amount_quote, r.timestamp = t.timestamp
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
         ");
+        let _guard = NEO4J_WRITE_LOCK.lock().await;
         self.neo4j_client.run(q.param("x", params)).await.map_err(|e| e.into())
     }
 
@@ -1381,6 +1401,7 @@ impl LinkGraph {
                 r.timestamp = t.timestamp
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
         ");
+        let _guard = NEO4J_WRITE_LOCK.lock().await;
         self.neo4j_client.run(q.param("x", params)).await.map_err(|e| e.into())
     }
 
@@ -1407,6 +1428,7 @@ impl LinkGraph {
                 r.timestamp = t.timestamp
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
         ");
+        let _guard = NEO4J_WRITE_LOCK.lock().await;
         self.neo4j_client.run(q.param("x", params)).await.map_err(|e| e.into())
     }
 

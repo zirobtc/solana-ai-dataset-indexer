@@ -471,7 +471,11 @@ async fn main() -> Result<()> {
     let neo4j_uri = env::var("NEO4J_URI").expect("NEO4J_URI must be set");
 
     // --- Client Initialization ---
-    let db_client = Client::default().with_url(&db_url);
+    let client_with_url = Client::default().with_url(&db_url);
+    let db_client = client_with_url
+        .with_user("default")
+        .with_password("");
+
     db_client.query("SELECT 1").fetch_one::<u8>().await?;
     println!(" Connection to ClickHouse successful.");
 
@@ -482,7 +486,7 @@ async fn main() -> Result<()> {
     let rpc_client = Arc::new(RpcClient::new(rpc_url));
     println!(" Solana RPC client initialized.");
 
-    let neo4j_client = Arc::new(Graph::new(&neo4j_uri, "", "").await?);
+    let neo4j_client = Arc::new(Graph::new(&neo4j_uri, "neo4j", "neo4j123").await?);
     println!(" Connection to Neo4j successful.");
 
     // --- Channel for our NEW UnifiedTransaction type ---
