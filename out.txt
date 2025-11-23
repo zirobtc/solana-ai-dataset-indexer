@@ -1,0 +1,66 @@
+ Connection to ClickHouse successful.
+ Redis client initialized.
+ Solana RPC client initialized.
+ Connection to Neo4j successful.
+[Main]  priming initial native price...
+[PriceService] Fetched PriceResponse { solana: UsdPrice { usd: 229.62 } }
+[Main]  Initial native price set to: $229.62
+[Main] 🚀 Redis publisher service spawned.
+[Main] 🚀 Database (Raw Events) writer service spawned.
+[Redis Publisher] Service started.
+[DB Writer] Service started.
+[Main] 🚀 Wallet stats aggregator thread spawned.
+[DB Writer] Consumer group 'database_writers' already exists. Resuming.
+[walletAggregator] Consumer group 'wallet_aggregators' already exists. Resuming.
+[TokenAggregator] ✔️ Connected to ClickHouse, Redis, and Solana RPC.
+[Main] 🚀 Token stats aggregator thread spawned.
+[TokenAggregator] Consumer group 'token_aggregators' already exists. Resuming.
+[Main] 🚀 Wallet graph aggregator thread spawned.
+[Main] 🧪 Mode: SIMULATOR. Spawning simulator task.
+ Transaction processor started with 1 protocol handlers.
+🧪 Starting Simulator from file: scenario.json
+🧪 Loaded and sorted 2 scenarios. Starting injection loop...
+[WalletGraph] ✔️ Connected to ClickHouse, Neo4j, and Redis.
+[LinkGraph] Consumer group 'link_graph_analyzers' already exists. Resuming.
+[PriceService] Fetched PriceResponse { solana: UsdPrice { usd: 229.62 } }
+[PriceService]  Updated native price: $229.62
+[Simulator] -> Injecting event: Mint
+[TokenAggregator] ⚙️ Starting processing for a new batch of 1 events...
+[TokenAggregator] -> Batch contains 1 unique tokens.
+[walletStats] 🔎 Found 1 unique wallets and 0 unique holding keys in batch.
+[db] Stored 1 DB Writer mint actions.
+[TokenAggregator] -> Fetched 1 existing token records from DB.
+[TokenAggregator] -> Enriched existing token record for TestSignalToken55555555555555555555555555555 with MINT event data.
+[TokenAggregator] 💾 Writing 1 updated token rows to ClickHouse.
+[walletStats] Fetched 1 existing profiles and 0 existing holdings from DB.
+[walletStats] Processing individual events in batch...
+[walletStats] Starting enrichment for 1 profiles...
+[walletStats] Spawning domain name lookups for 1 wallets.
+[walletStats] ✅ Enrichment complete. Found 0 new domains.
+[walletStats] 🏁 Batch processing complete. Finalizing and persisting data...
+[db] 💾 Flushing 1 profiles...
+[db] Stored 1 Token Aggregator tokens actions.
+[TokenAggregator] ✅ Finished processing batch of 1.
+[db] Stored 1 Wallet Aggregator profiles actions.
+[walletAggregator] ✅ Batch processed successfully. Forwarding to LinkGraph.
+[Simulator] -> Injecting event: Trade
+✅ Simulator finished injecting all scenarios.
+[TokenAggregator] ⚙️ Starting processing for a new batch of 1 events...
+[walletStats] 🔎 Found 1 unique wallets and 1 unique holding keys in batch.
+[TokenAggregator] -> Batch contains 1 unique tokens.
+[db] Stored 1 DB Writer trade actions.
+[TokenAggregator] -> Fetched 1 existing token records from DB.
+[TokenAggregator] 💾 Writing 1 updated token rows to ClickHouse.
+[walletStats] Fetched 1 existing profiles and 1 existing holdings from DB.
+[walletStats] Processing individual events in batch...
+[walletStats] Starting enrichment for 1 profiles...
+[walletStats] Spawning domain name lookups for 1 wallets.
+[db] Stored 1 Token Aggregator tokens actions.
+[TokenAggregator] ✅ Finished processing batch of 1.
+[walletStats] ✅ Enrichment complete. Found 0 new domains.
+[walletStats] 🏁 Batch processing complete. Finalizing and persisting data...
+[db] 💾 Flushing 1 profiles...
+[db] Stored 1 Wallet Aggregator profiles actions.
+[db] 💾 Flushing 1 holdings...
+[db] Stored 1 Wallet Aggregator holdings actions.
+[walletAggregator] ✅ Batch processed successfully. Forwarding to LinkGraph.

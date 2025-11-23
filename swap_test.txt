@@ -1,0 +1,46 @@
+21WzRuPLz7phBHGt81x2mXSMzb7wdh3cABt5o5jeoUJKGLCmygdzLd1vWPFqTei9qiam4e4aKhCNAfkJQg3F742N
+20% sl  0.001 Prio  0.01 Bribe
+Mev Mode 1
+
+Output ground truth:
+price $0.00003
+Tokens amount 62.2K
+buy cost $1.8
+
+ 
+40% sl  0.00001 Prio  0.00001 Bribe
+Mev Mode 1
+
+Output ground truth:
+price $0.00003
+Tokens amount 62.2K
+buy cost $1.8
+
+
+Buy Trade: 6ZFUExAdFX9dhVrK7NwLfEgjZN95quLwvkxDtvgbnaoruM6BiNpVMR1JUX6KPQTvA784GaTrecYT9CUpuzzvV5q
+
+10% sl  0 Tip  0.001 Prio Fee
+Mev Procetion 0 no mev
+
+Output :
+price $0.000005
+Tokens amount 35.3K
+buy cost $0.18
+
+Migration event
+2R4HTLLTuq1iq9QMPfsrzSi7ifUbbCwe7Z5MjaLoypNmAttNiCdZKkZi2Y8qgjgKWAXCYZCYkojGHQHGGiBhSNfF
+
+Create event
+JkqBNxuGPpDtPgYyY447GnmxrVrG92gSsoecd9RPWwFkUNAN2ShjBX6p7Qrr3kXykSeSeL5EYjjTXqtCjX28VYc
+
+Streamflow Create
+PfZExDRgsFXBgxx1HvnWLyiu1KtFZeQJBRcdJBU2aZhAFEpToHAjWN2DM4hitXvYWgnSHGa9rgmw2fnTuX62oiE
+
+Streamflow Withdraw
+5DYLuzpt7kx1GrwqNQFJWP2fFPfDan68YX3N4W2ENWFroy84XjgDAdra8eywixcQWXVzpwYeL6HUxfy1y5yju1Z6
+
+Streamflow Cancel
+JGodQnyoBp4DpksaGftjW3dkWNpovriwfetQw4zgPMe4eTcKd9UQT7inzJMtAYCUCw5EaMhBgHUk4Y2CMNMy4qU
+
+failed pump fun swap
+4wquoUeSSuwyqR3dtcwtPuYqWkX6c27Fq7QPfavLWFWtkhR4qhsCziz9ACTYi2wpdAUjzVX44n6eKnfkLuXDSydM

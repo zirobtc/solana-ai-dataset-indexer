@@ -1,0 +1,602 @@
+// File: src/handlers/meteora_handler.rs
+
+use anchor_lang::{AnchorDeserialize, AnchorSerialize};
+use anyhow::Result;
+use async_trait::async_trait;
+use borsh::BorshDeserialize;
+use clickhouse::{Client, Row};
+use redis::aio::MultiplexedConnection;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use solana_sdk::pubkey::Pubkey;
+use solana_transaction_status::UiInstruction;
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::fs;
+use std::str::FromStr;
+use yellowstone_grpc_proto::prelude::InnerInstruction;
+
+use super::{TransactionHandler, TransactionInfo};
+use crate::{
+    database::insert_rows,
+    handlers::{Idl, anchor_event_discriminator, constants},
+    types::{FeeCollectionRow, PoolCreationRow, TradeRow},
+    utils::{FormattedInstruction, get_asset_balances},
+};
+
+//==============================================================================
+// 1. DECODING LOGIC (The original Decoder)
+//==============================================================================
+
+// --- INSTRUCTION ARG STRUCTS ---
+
+#[derive(Debug, BorshDeserialize, Serialize, Clone, AnchorSerialize)]
+pub struct SwapParameters {
+    pub amount_in: u64,
+    pub minimum_amount_out: u64,
+}
+
+#[derive(Debug, BorshDeserialize, Serialize, Clone)]
+pub struct InitializePoolParameters {
+    pub name: String,
+    pub symbol: String,
+    pub uri: String,
+}
+
+#[derive(Debug, BorshDeserialize, Serialize, Clone)]
+pub struct ClaimCreatorTradingFeeArgs {
+    pub max_base_amount: u64,
+    pub max_quote_amount: u64,
+}
+
+#[derive(Debug, BorshDeserialize, Serialize, Clone)]
+pub struct ClaimTradingFeeArgs {
+    pub max_amount_a: u64,
+    pub max_amount_b: u64,
+}
+
+#[derive(Debug, BorshDeserialize, Serialize, Clone)]
+pub struct WithdrawMigrationFeeArgs {
+    pub flag: u8,
+}
+
+// --- EVENT STRUCTS ---
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, Serialize)]
+pub struct SwapResult {
+    pub actual_input_amount: u64,
+    pub output_amount: u64,
+    pub next_sqrt_price: u128,
+    pub trading_fee: u64,
+    pub protocol_fee: u64,
+    pub referral_fee: u64,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, Serialize)]
+pub struct EvtSwap {
+    pub pool: Pubkey,
+    pub config: Pubkey,
+    pub trade_direction: u8,
+    pub has_referral: bool,
+    pub params: SwapParameters,
+    pub swap_result: SwapResult,
+    pub amount_in: u64,
+    pub current_timestamp: u64,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, Serialize)]
+pub struct EvtInitializePool {
+    pub pool: Pubkey,
+    pub config: Pubkey,
+    pub creator: Pubkey,
+    pub base_mint: Pubkey,
+    pub pool_type: u8,
+    pub activation_point: u64,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, Serialize)]
+pub struct EvtClaimCreatorTradingFee {
+    pub pool: Pubkey,
+    pub token_base_amount: u64,
+    pub token_quote_amount: u64,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, Serialize)]
+pub struct EvtClaimTradingFee {
+    pub pool: Pubkey,
+    pub token_base_amount: u64,
+    pub token_quote_amount: u64,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, Serialize)]
+pub struct EvtWithdrawMigrationFee {
+    pub pool: Pubkey,
+    pub fee: u64,
+    pub flag: u8,
+}
+
+// --- DECODED DATA STRUCTS ---
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(tag = "type", content = "data")]
+pub enum DecodedInstruction {
+    Swap(SwapParameters),
+    InitializeVirtualPoolWithSplToken(InitializePoolParameters),
+    InitializeVirtualPoolWithToken2022(InitializePoolParameters),
+    ClaimCreatorTradingFee(ClaimCreatorTradingFeeArgs),
+    ClaimTradingFee(ClaimTradingFeeArgs),
+    WithdrawMigrationFee(WithdrawMigrationFeeArgs),
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(tag = "type", content = "data")]
+pub enum DecodedEvent {
+    Swap(EvtSwap),
+    InitializePool(EvtInitializePool),
+    ClaimCreatorTradingFee(EvtClaimCreatorTradingFee),
+    ClaimTradingFee(EvtClaimTradingFee),
+    WithdrawMigrationFee(EvtWithdrawMigrationFee),
+}
+
+#[derive(Debug)]
+pub struct DecodedAction<'a> {
+    pub instruction: DecodedInstruction,
+    pub event: Option<DecodedEvent>,
+    pub instruction_accounts: &'a [u8],
+}
+
+// --- DECODER ---
+pub struct MeteoraBondingCurveDecoder {
+    instruction_discriminators: HashMap<[u8; 8], String>,
+    event_discriminators: HashMap<[u8; 8], String>,
+    program_id: Pubkey,
+    pub instruction_layouts: HashMap<String, HashMap<String, usize>>,
+}
+
+impl MeteoraBondingCurveDecoder {
+    pub fn new() -> Result<Self> {
+        let idl_str = fs::read_to_string("meteora_bonding_curve.json")?;
+        let idl: Idl = serde_json::from_str(&idl_str)?;
+        let mut instruction_discriminators = HashMap::new();
+        let mut instruction_layouts = HashMap::new();
+
+        for ix in idl.instructions {
+            let disc_vec = ix.discriminator;
+
+            // Handle optional discriminator
+            if disc_vec.len() == 8 {
+                let mut disc = [0u8; 8];
+                disc.copy_from_slice(&disc_vec);
+                let account_map: HashMap<String, usize> = ix
+                    .accounts
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, acc)| (acc.name, index))
+                    .collect();
+
+                instruction_layouts.insert(ix.name.clone(), account_map);
+                instruction_discriminators.insert(disc, ix.name);
+            }
+        }
+        let event_discriminators = idl
+            .events
+            .into_iter()
+            .map(|event| (anchor_event_discriminator(&event.name), event.name))
+            .collect();
+
+        let program_id = Pubkey::from_str(&idl.address)?;
+        Ok(Self {
+            instruction_discriminators,
+            event_discriminators,
+            program_id,
+            instruction_layouts,
+        })
+    }
+
+    pub fn decode_transaction<'a>(
+        &self,
+        formatted_instructions: &'a [FormattedInstruction<'a>],
+        account_keys: &[Pubkey],
+    ) -> Result<Vec<DecodedAction<'a>>> {
+        let mut all_actions = Vec::new();
+
+        for formatted_ix in formatted_instructions {
+            let event = self.find_event_in_inner_instructions(&formatted_ix.inner_instructions)?;
+
+            if account_keys.get(formatted_ix.instruction.program_id_index as usize)
+                == Some(&self.program_id)
+            {
+                if let Some(instruction) =
+                    self.decode_instruction(&formatted_ix.instruction.data)?
+                {
+                    all_actions.push(DecodedAction {
+                        instruction,
+                        event: event.clone(),
+                        instruction_accounts: &formatted_ix.instruction.accounts,
+                    });
+                }
+            }
+        }
+        Ok(all_actions)
+    }
+
+    fn decode_instruction(&self, data: &[u8]) -> Result<Option<DecodedInstruction>> {
+        if data.len() < 8 {
+            return Ok(None);
+        }
+        let mut disc = [0u8; 8];
+        disc.copy_from_slice(&data[..8]);
+        let instruction_data = &data[8..];
+
+        if let Some(name) = self.instruction_discriminators.get(&disc) {
+            match name.as_str() {
+                "swap" => {
+                    if let Ok(args) = SwapParameters::try_from_slice(instruction_data) {
+                        println!("Decoded args {:#?}", args);
+                        return Ok(Some(DecodedInstruction::Swap(args)));
+                    }
+                }
+                "initialize_virtual_pool_with_spl_token" => {
+                    if let Ok(args) = InitializePoolParameters::try_from_slice(instruction_data) {
+                        return Ok(Some(DecodedInstruction::InitializeVirtualPoolWithSplToken(
+                            args,
+                        )));
+                    }
+                }
+                "initialize_virtual_pool_with_token2022" => {
+                    if let Ok(args) = InitializePoolParameters::try_from_slice(instruction_data) {
+                        return Ok(Some(
+                            DecodedInstruction::InitializeVirtualPoolWithToken2022(args),
+                        ));
+                    }
+                }
+                "claim_creator_trading_fee" => {
+                    if let Ok(args) = ClaimCreatorTradingFeeArgs::try_from_slice(instruction_data) {
+                        return Ok(Some(DecodedInstruction::ClaimCreatorTradingFee(args)));
+                    }
+                }
+                "claim_trading_fee" => {
+                    if let Ok(args) = ClaimTradingFeeArgs::try_from_slice(instruction_data) {
+                        return Ok(Some(DecodedInstruction::ClaimTradingFee(args)));
+                    }
+                }
+                "withdraw_migration_fee" => {
+                    if let Ok(args) = WithdrawMigrationFeeArgs::try_from_slice(instruction_data) {
+                        return Ok(Some(DecodedInstruction::WithdrawMigrationFee(args)));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(None)
+    }
+
+    // FIX: This function now correctly looks in inner instructions for event CPIs
+    fn find_event_in_inner_instructions<'a>(
+        &self,
+        inner_instructions: &[Cow<'a, InnerInstruction>],
+    ) -> Result<Option<DecodedEvent>> {
+        for instruction_cow in inner_instructions {
+            // The `prost` `InnerInstruction` type already has the data as a `Vec<u8>`.
+            // We can access it directly without base58 decoding.
+            if let Some(event) = self.decode_single_event(&instruction_cow.data)? {
+                return Ok(Some(event));
+            }
+        }
+        Ok(None)
+    }
+
+    // FIX: This now correctly handles event data from a CPI, matching your other decoders
+    fn decode_single_event(&self, data: &[u8]) -> Result<Option<DecodedEvent>> {
+        // An event CPI has an 8-byte instruction discriminator (which we ignore)
+        // and an 8-byte event discriminator. Total prefix is 16 bytes.
+        if data.len() < 16 {
+            return Ok(None);
+        }
+
+        let mut event_disc = [0u8; 8];
+        event_disc.copy_from_slice(&data[8..16]); // The event discriminator is the SECOND 8 bytes
+        let event_data = &data[16..];
+
+        if let Some(name) = self.event_discriminators.get(&event_disc) {
+            match name.as_str() {
+                "EvtSwap" => {
+                    if let Ok(event) = EvtSwap::try_from_slice(event_data) {
+                        println!("Decoded events {:#?}", event);
+                        return Ok(Some(DecodedEvent::Swap(event)));
+                    }
+                }
+                "EvtInitializePool" => {
+                    if let Ok(event) = EvtInitializePool::try_from_slice(event_data) {
+                        return Ok(Some(DecodedEvent::InitializePool(event)));
+                    }
+                }
+                "EvtClaimCreatorTradingFee" => {
+                    if let Ok(event) = EvtClaimCreatorTradingFee::try_from_slice(event_data) {
+                        return Ok(Some(DecodedEvent::ClaimCreatorTradingFee(event)));
+                    }
+                }
+                "EvtClaimTradingFee" => {
+                    if let Ok(event) = EvtClaimTradingFee::try_from_slice(event_data) {
+                        return Ok(Some(DecodedEvent::ClaimTradingFee(event)));
+                    }
+                }
+                "EvtWithdrawMigrationFee" => {
+                    if let Ok(event) = EvtWithdrawMigrationFee::try_from_slice(event_data) {
+                        return Ok(Some(DecodedEvent::WithdrawMigrationFee(event)));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(None)
+    }
+}
+
+//==============================================================================
+// 2. DATABASE MAPPING (The Row Structs)
+//==============================================================================
+
+#[derive(Row, Serialize, Debug)]
+struct MeteoraSwapRow {
+    // Transaction Metadata
+    tx_signature: String,
+    slot: u64,
+    block_timestamp: i64,
+    signer: String,
+    is_success: bool,
+    error: Option<String>,
+    priority_fee: Option<u64>,
+
+    // Event Data
+    pool: String,
+    config: String,
+    trade_direction: u8,
+    has_referral: bool,
+    amount_in: u64,
+    minimum_amount_out: u64,
+    output_amount: u64,
+    trading_fee: u64,
+    protocol_fee: u64,
+    referral_fee: u64,
+}
+
+#[derive(Row, Serialize, Debug)]
+struct MeteoraPoolInitializationRow {
+    // Transaction Metadata
+    tx_signature: String,
+    slot: u64,
+    block_timestamp: i64,
+    signer: String,
+    is_success: bool,
+    error: Option<String>,
+    priority_fee: Option<u64>,
+
+    // Instruction & Event Data
+    pool: String,
+    config: String,
+    creator: String,
+    base_mint: String,
+    pool_type: u8,
+    name: String,
+    symbol: String,
+    uri: String,
+}
+
+//==============================================================================
+// 3. PROCESSING LOGIC (The Handler)
+//==============================================================================
+
+pub struct MeteoraHandler {
+    decoder: MeteoraBondingCurveDecoder,
+}
+
+impl MeteoraHandler {
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            decoder: MeteoraBondingCurveDecoder::new()?,
+        })
+    }
+}
+
+#[async_trait]
+impl TransactionHandler for MeteoraHandler {
+    fn name(&self) -> &'static str {
+        "Meteora Bonding Curve"
+    }
+
+    fn is_of_interest(&self, tx_info: &TransactionInfo) -> bool {
+        tx_info
+            .logs
+            .iter()
+            .any(|log| log.contains("Program dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN invoke ["))
+    }
+
+    async fn handle_transaction(
+        &self,
+        tx_info: &TransactionInfo,
+        db_client: &Client,
+        redis_conn: &MultiplexedConnection,
+        native_price_usd: f64,
+    ) -> Result<()> {
+        let decoded_data = self
+            .decoder
+            .decode_transaction(tx_info.formatted_instructions, tx_info.account_keys)?;
+
+        if decoded_data.is_empty() {
+            return Ok(());
+        }
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis() as u64;
+
+        let mut trade_rows = Vec::new();
+        let mut pool_creation_rows = Vec::new();
+        let mut fee_collection_rows = Vec::new();
+
+        for action in decoded_data {
+            let get_acc_str = |ix_name: &str, acc_name: &str| -> String {
+                self.decoder
+                    .instruction_layouts
+                    .get(ix_name)
+                    .and_then(|l| l.get(acc_name))
+                    .and_then(|&i| action.instruction_accounts.get(i))
+                    .and_then(|&ki| tx_info.account_keys.get(ki as usize))
+                    .map(|pk| pk.to_string())
+                    .unwrap_or_default()
+            };
+
+            match action.instruction {
+                DecodedInstruction::Swap(ix_args) => {
+                    if let Some(DecodedEvent::Swap(e)) = action.event {
+                        // For Meteora Bonding Curve, a swap is always buying the base token with the quote token.
+                        // trade_direction: 0 for A(quote) to B(base), 1 for B to A (not possible in bonding curve)
+                        let base_address = get_acc_str("swap", "base_mint");
+                        let quote_address = get_acc_str("swap", "quote_mint");
+
+                        // FIX: The user/signer account in the IDL is `payer`, not `user`.
+                        let maker = Pubkey::from_str(&get_acc_str("swap", "payer"))?;
+                        let (pre_base, post_base) =
+                            get_asset_balances(tx_info, &maker, &base_address);
+                        let (pre_quote, post_quote) =
+                            get_asset_balances(tx_info, &maker, &quote_address);
+
+                        let base_amount = e.swap_result.output_amount;
+                        let quote_amount = e.swap_result.actual_input_amount;
+
+                        // NOTE: Decimals are not in event/args, assuming 6 for base and 9 for quote(SOL).
+                        // This is a potential point of failure and should be fetched dynamically via RPC.
+                        let base_decimals = 6;
+                        let quote_decimals = 9;
+
+                        let total = quote_amount as f64 / 10f64.powi(quote_decimals);
+                        let price = if base_amount > 0 {
+                            total / (base_amount as f64 / 10f64.powi(base_decimals))
+                        } else {
+                            0.0
+                        };
+
+                        let slippage = if e.swap_result.output_amount > 0 {
+                            (e.swap_result.output_amount as f64 - ix_args.minimum_amount_out as f64)
+                                / e.swap_result.output_amount as f64
+                        } else {
+                            0.0
+                        };
+
+                        trade_rows.push(TradeRow {
+                            updated_at: now_ms,
+                            signature: tx_info.signature.to_string(),
+                            timestamp: tx_info.block_time,
+                            slot: tx_info.slot,
+                            success: tx_info.is_success,
+                            error: if tx_info.is_success {
+                                None
+                            } else {
+                                tx_info.error.clone()
+                            },
+                            priority_fee: tx_info.priority_fee.unwrap_or(0),
+                            bribe_fee: tx_info.tip.unwrap_or(0),
+                            mev_protection: tx_info.mev_protection,
+                            maker: maker.to_string(),
+                            pre_base_balance: pre_base,
+                            post_base_balance: post_base,
+                            pre_quote_balance: pre_quote,
+                            post_quote_balance: post_quote,
+                            trade_type: constants::TRADE_TYPE_BUY,
+                            protocol: constants::PROTOCOL_METEORA_BONDING,
+                            platform: 0,
+                            pool_address: e.pool.to_string(),
+                            base_address,
+                            quote_address,
+                            slippage: slippage as f32,
+                            base_amount,
+                            quote_amount,
+                            price,
+                            price_usd: price * native_price_usd,
+                            total_supply: 0, // Not applicable/available here
+                            total,
+                            total_usd: total * native_price_usd,
+                        });
+                    }
+                }
+                DecodedInstruction::InitializeVirtualPoolWithSplToken(_ix_args)
+                | DecodedInstruction::InitializeVirtualPoolWithToken2022(_ix_args) => {
+                    if let Some(DecodedEvent::InitializePool(e)) = action.event {
+                        let ix_name = "initialize_virtual_pool_with_spl_token"; // Accounts are same for both
+                        pool_creation_rows.push(PoolCreationRow {
+                            updated_at: now_ms,
+                            signature: tx_info.signature.to_string(),
+                            timestamp: tx_info.block_time,
+                            slot: tx_info.slot,
+                            success: tx_info.is_success,
+                            error: if tx_info.is_success {
+                                None
+                            } else {
+                                tx_info.error.clone()
+                            },
+                            priority_fee: tx_info.priority_fee.unwrap_or(0),
+                            protocol: constants::PROTOCOL_METEORA_BONDING,
+                            creator_address: e.creator.to_string(),
+                            pool_address: e.pool.to_string(),
+                            base_address: e.base_mint.to_string(),
+                            quote_address: get_acc_str(ix_name, "quote_mint"),
+                            lp_token_address: "".to_string(), // Bonding curve doesn't have an LP token
+                            initial_base_liquidity: None,     // No initial liquidity on creation
+                            initial_quote_liquidity: None,
+                            base_decimals: None, // Not in event, would require on-chain lookup
+                            quote_decimals: None,
+                        });
+                    }
+                }
+                DecodedInstruction::ClaimCreatorTradingFee(_args) => {
+                    if let Some(DecodedEvent::ClaimCreatorTradingFee(e)) = action.event {
+                        let ix_name = "claim_creator_trading_fee";
+                        fee_collection_rows.push(FeeCollectionRow {
+                            updated_at: now_ms,
+                            signature: tx_info.signature.to_string(),
+                            timestamp: tx_info.block_time,
+                            slot: tx_info.slot,
+                            success: tx_info.is_success,
+                            error: if tx_info.is_success {
+                                None
+                            } else {
+                                tx_info.error.clone()
+                            },
+                            priority_fee: tx_info.priority_fee.unwrap_or(0),
+                            protocol: constants::PROTOCOL_METEORA_BONDING,
+                            pool_address: e.pool.to_string(),
+                            recipient_address: get_acc_str(ix_name, "creator"),
+                            // FIX: Changed to match IDL account names
+                            token_0_mint_address: get_acc_str(ix_name, "base_mint"),
+                            token_0_amount: e.token_base_amount,
+                            token_1_mint_address: Some(get_acc_str(ix_name, "quote_mint")),
+                            token_1_amount: Some(e.token_quote_amount),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        insert_rows(db_client, "trades", trade_rows, self.name(), "trade").await?;
+        insert_rows(
+            db_client,
+            "pool_creations",
+            pool_creation_rows,
+            self.name(),
+            "pool creation",
+        )
+        .await?;
+        insert_rows(
+            db_client,
+            "fee_collections",
+            fee_collection_rows,
+            self.name(),
+            "fee collection",
+        )
+        .await?;
+
+        Ok(())
+    }
+}

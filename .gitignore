@@ -1,0 +1,59 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+
+# Cargo/package manager
+Cargo.lock
+/.cargo/
+/vendor/
+
+# IDE/editor
+.vscode/
+.idea/
+*.iml
+.DS_Store
+*.swp
+*.swo
+
+# Logs & dumps
+*.log
+log/
+logs/
+*.tmp
+*.bak
+*.old
+*.core
+*.pid
+
+# Env & secrets
+.env
+.env.*
+*.key
+*.pem
+
+# Generated data/output
+out/
+output/
+dump/
+data/
+*.car
+*.sql
+*.sqlite
+*.db
+*.csv
+*.tsv
+*.jsonl
+*.parquet
+
+# Backups/archives
+*.zip
+*.tar
+*.tar.gz
+*.rar
+
+# Node (if present)
+node_modules/
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+

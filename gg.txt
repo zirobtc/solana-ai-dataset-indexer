@@ -1,0 +1,270 @@
+i already made a transformer llama based architecture motion generator, using ml, with cotnext window 32k, so i know some of the machine learning steps and how transformers works so for my next project i wanna archive this:
+
+
+
+
+
+
+
+So my plan is to make a model thats is able to outsmart every single memecoin in solana ecosystem, since your knowlege is limited for pump fun tokens and bonk launchpad, i will tell you some infos:
+
+
+
+So pumpfun is a platform on solana that let you make coins for cheap and then you have this vritual liquidity pool, and pepole can buy and once enough money is in this pool wich is 80 sol the bonding curve complete and the token migrate to a real liquidity provider called PumpAMM. There are a lot of tokens minted every minute the stats are very low for sucefful tokens, we dont use price but we use market cap since the price is not a convenience for this memecoins tokens. so usually this tokens are highly PVP, there are thoose pepole called KOLs wich are known traders that leak their "public" wallet and pepole track them or copytrade them but ofc most of them make money by dumping tokens on top of copytraders so just copytrading them is not a win strategy. Also tokens usually are either fast cook or slow cook, wich means they could be a token that pump very fast and have crazy high volume since at start or slow cook wich couldf be a good token that hit 40mln market cap but takes time so could dump a lot, usually in this tokens there are CTO leaders so pepole experienced on running a token and they buy supply and with all their connections on money they push a token. There also the pepole called Cabals or ffn groups, before they were just wealthy pepole that pump a token really hard and profit very big, and their launch are very high architected or their CTO (community take over) if they didnt launch the token, and usually that pepole have shady connections with exchanges like mexc and they get favoritism, but nowadays cabal is more general with groups or teams of pepole that have neough moeny and they pump tokens hard. So you gotta understand this game is a mixed one, but there is always insdyer info is always people sharing tokens in tg groups or x groups or pepole know a friend wich is know for pumping tokens or they have access to private groups, This of course lead to heavy manipulation or just normal market behaviors so if you are not in groups or with really important people you are just trading blindly. This are most of tokens but there are tokens that send because of other factors example Elon musk tweet something or trump, or a news, or just a viral trend on tiktok. But you gotta understand even if lets say in this fair system i launch that token about a trend first but then "cabal" team launch same one right after me, yeah mine can run but the cabal one will always prevail because artificial liquidity heavy heavy connections with everyone and everybody, favoritism and lot of shady stuff in the chain. Those people make millions daily easily and is very hard for a common person like me even like them or even has any chance on making money, the stats are clear. There also lot of other of factors as why a token send which could be a "beta" play lets say example a token called Fwog pumps a lot like 200mln market cap and is trending on Dex (dexscreener) then people start to mint beta plays so lets say example "Cwat" , which usually not always even if is more rare now, people like to buy since they missed the "alpha" play. Also other factors like people active in the chain or volume in general is high, or when volume is down sometimes there are tokens that break this chain example solana was dumping an a token called "Troll" pumped from 3 million to 160mln in the same day and restored hope to the trenches (Trenches is a term used to call all this market sector, or usually for the tokens very low mcap since PVP is very high). Then there are those so called PVE plays Players Versus Environment, which are the tokens that send out the most because they go viral to the retailers side, and then al the people in the trenches all benefit unless they bought very late, example of this PVE plays is PNUT a famous squirrel that was killed unfairly in the us and went so viral that all news and socials were talking about and all trenches bought below 10mln (wich is a very high market cap already) in few days binance listed it and went to 2 billion and made many millionaires. Usually those tokens are pushed by cabals because think of cabals team rather than just making a trend, they can get ready going trend and just ride it with their millions and this boom makes PVE plays. What about letsbonk wich is a pumpfun competitor is just the exact same thing as pump.fun but raydium to battle this pump fun huge success and leaving their CPMM pool they made their launchpad and there is also this thing called "bonk" cabal wich is just the team buying the tokens in their own platform to have way better image and boost their stats, since this platforms really are just "attention" based and stats based.
+
+
+
+Lets talk about now trading platforms the tools that mostly used by retail traders or 99% of people using the chain besides bundles or scripts (market making scripts, or volume bot, or copy trade) So there are mainly 1 platform right now Axiom.trade which is a platform that let traders se volume, and also this thing called pump vision or pulse which let you see in 3 columns categories one is for new pairs on this launchpads one for the about to graduate so stuff near the completion of the bonding curve and then the graduated one and let you add filters like market cap, or volume, or dev bought dev sold or txs numbers, or total fee paid trading that token in total, let you also track wallets and see when they buy in the chart or get pop notification, and also a thing called Twitter Tracker which let you have a twitter feed of most tracked twitter profiles by traders or just add you own twitter list and that's all.
+
+
+
+Lets move on more token types example are bundles which refers to this solana jito feature that let people buy in parallel at same time and refers to people that buy either with many wallets at same time with or without bundle so they buy lot of supply and usually the platforms flag it as bundle with icon because they are same slot, which usually a red flag. While the other category of bundle called bundle launch are just tokens which they get sniped block 0 and buy big % of the supply right at launch and nobody buys and this is bad because in eyes of traders is not a good thing they don't trust a centralized supply, but is tricky because some tokens send hard regardless of the bundle so is not a hard coded rule, if people se volume and see the token good they ignore mostly all red flags, or more if there is a cabal inside or many insider info like a friend group telling you they are launching a token and bundling it so you know you can trust your friends and make profit but of course for a outsider trader will look like a bad token or a rug. So all this stats can be seen in axiom btw so % of bundle or who funded those wallets you can see the pnl of each trader in the token (pnl history so all his token bought who funded it). An common term is "bundle out" which means when pepole are looking maybe a token their are interested they say bundle out to other people so they buy because they dont wanna buy after a bundle or after a guy that holds lot of supply but again depends on the token, sometimes tokens runs and a wallet has 10%. So supply control, so usually depends because 5% is considered the limit limit for 1 single wallet to hold but depends on market cap example a 1mln token having 5% is very huge while at 10k is another story, but usually a healthy supply is between 0 - 3% but depends also if traders intuit that those wallets are bundle like 3 wallets are mine and 3% each then still a red flag, or worst if is connected in the bubble map which an window in axiom that shows you the wallets that are funded or transferred to other wallets that traded that same tokens. Another thing that influence the token pump could be but very less effective is dev history in chase has other succesfull tokens, or sometimes influnciate A lot in chase the dev wallet is very famous lets say he same dev walled that made $Wif so an billion dollar token then ofc no matter what he mints will always pump. Another info is that we measure pnl by Xs multipliers so we say i made 30x or 2x my initial inverstment for convenience. Another very common thing usually traders do so we said that pepole copytrade or track wallets like Kols (example: Mitch, Dior100x, Alon, Murad, real names of Kols pepole) or very important they track wallets that have huge pnl on PVE plays or big tokens like lets say a sniper of $Trump token (official token of Trump) pepole will track it regardless and when he buys you will see big pumps but dosent mean there are no dumps, and also would be impossible to buy in between so you either buy before it low risk or dont buy after, this rule is for all tracking wallets in general.
+
+
+
+Now lets get to some knowledge shared by the most popular kol called Cupsey, wich is a teenage guy who made 8 figs profit monthly in this space, he says in his interviews pepole ask him why you bought that token why you buying this and that, and he always reply "i have experience and in my brain when i see a token i cant explain but i have a feeling of it could send from chart or token image or just the ticker" so that would be likely a good feature to add to the model to learn that human feeling of recognizing tokens just by vibe or that feeling. Another term or usually a bullish sign is called "paying dex" or "dex paid" which refers to the dexsreener enhanced information , so people when opening dex screener they see the token banner and token socials links. Or also another bullish thing which is slightly more expensive is dexscreener boost wich are boost power ups that help your token be more visibile in the dexscreener trending top bar or get the gold ticker, usually more money spent on a token more bullish it is, not always tho there are tokens that don't move. So BEFORE doing anything else with the model we wanna make ask me some questions
+
+
+
+
+
+When you refer to info in private Telegram or X groups, how far in advance of the token creation on Pump.fun does this information typically appear? Are we talking minutes, hours, or days?
+
+
+
+
+
+
+
+Any time could be 1 month after a token launch a week before the launch, after launch, or 10 min after launch. Those groups are either more public accessible but less "alpha" so insider info or more private and have more access to private info, but remember idk that much there are so many groups like a lot we talking about 100k groups or more so really depeands when people get alpha or people wanna launch in group.
+
+
+
+
+
+
+
+Identifying Key Players Early: You mentioned Cabals, CTO leaders, and KOLs. Besides tracking known wallets, what are the earliest on-chain signals that a launch is backed by a sophisticated entity? For example, are there specific funding patterns from certain exchanges, or unique contract creation settings?
+
+
+
+
+
+
+
+Pumpfun tokens and any launchpad in 2025 the creator has 0 access to the code or cotnracts thoose are past thing of eth chain, for patterns i don't know i have 0 clue because as human there is a limited skill on finding patterns not like an ai model.
+
+
+
+
+
+
+
+
+
+
+
+Bonding Curve Velocity: On Pump.fun, a curve must reach ~80 SOL to migrate. Is there a "golden window" for how fast this should happen? Is a token that completes its curve in 10 minutes inherently more bullish than one that takes 3 hours? Or could a slower, steadier curve indicate a more stable community?
+
+
+
+
+
+
+
+Depends a lot, but usually tokens that migrate fast in high volume days and they are not bundled or straight rugs they have much success rate but most of them die max at 2 mln if they reach it wich is rare.
+
+
+
+
+
+
+
+The "Bundle" Nuance: You said a bundled launch isn't always a death sentence. What specific factors or post-launch metrics would convince a trader to buy into a token that was heavily bundled at launch? Is it purely about seeing massive volume come in afterward, or are there other signs?
+
+
+
+
+
+
+
+Depends a lot, as i said this space is very random so sometimes a token could send even bundled heavy if cabal team behind it most of the time is the case, or if there is insider info so people shilling that token in private groups and people know that is a good bundle not bad bundle. Or if the ticker is so bullish and the token just so good or in perfect meta that don't care about metrics.
+
+
+
+
+
+
+
+For Meta i mean usually and happens really frequently there is metas wich are a tematic for market so lets say a sort of a trend, example elon musk made an ai Waifu wich was cotnroversial, a token pumped very hard with bonk cabal in it. and all the lauchpads where fill with memes tokens about that waifu or about ai assistants or beta plays. So the meta was Ai / Anime or when example PNUT started to pump hard the meta became either Squirrels or Pnut stuff so example pnut wif hat or pnut in your butt, or other Animals that were in the same farm as PNUT because he was in a farm so other beta plays like a horse which was a friend of PNUT.
+
+
+
+So meta are just trend and usually there is a meta everyday and mostly when there is volume, if there is no meta you would see very low volume or no big plays, and metas last either few hours like news or even a week like elon musk waifu assistant.
+
+
+
+
+
+
+
+Supply Distribution Context: The 3-5% wallet holding rule is a great baseline. How does this rule change with market cap? For example, is a 5% holder at a $10k market cap ($500) viewed differently than a 5% holder at a $1M market cap ($50,000)?
+
+
+
+
+
+
+
+Anything above 2% after 1mln or worst 3mln or 5 mln is a redflag, while in general anything above 5% is very bad, while below really low levels like 10k or 20k 6% is usual, because is just couple of solana while at 1mln would cost you 10k.
+
+
+
+Here a list of prices per market cap, remember that the supply is always 1 billion
+
+
+
+1mln tokens at 4 mln mcap is 26 solana
+
+
+
+1mln token at 50k mcap is 0.3 solana
+
+
+
+1mln token at 200k is 1.1 solana
+
+
+
+1mln at 400k is 2.4 sol
+
+
+
+1mln at 9.31 mln is 53 sol
+
+
+
+
+
+
+
+those tokens by the way unless liquidity is injected they have low liquidity so thats why if guy has a lot and sells at once we say Full Clip and this make big dips, and not appealing for a guy who gonna buy the tops.
+
+
+
+
+
+
+
+Tokenomics of "Vibe": What makes a token's name, ticker, or image "feel" right? Are there common traits of successful tickers (e.g., short, catchy, culturally relevant)? Conversely, are there traits that are immediate red flags (e.g., using generic terms like 'Solana', 'Pepe', 'CEO', etc.)?
+
+
+
+
+
+
+
+For that i can't tell, is random but usually a funny ticker or smart one like lets say trump was dissing Elon musk wich already happened somone made a token wich pumped called $PVE as you know pve is player versus environment but he named the token ticker $PVE and name President vs Elon, or when TROLL token pumped wich the meta is OG tokens, this meta is to find very viral memes that are the first token deployed on chain and is dead we run it back, so the first troll token launched on solana was dead and they pumped it heavy and that made an meta called OG coins and a good ticker was Tronk so Bonk + Troll so troll on bonk. But usually very creative and short tickers are good tickers.
+
+
+
+
+
+
+
+Art & Effort: How much does the quality of the meme image or the website (if any) matter? Is there a tangible correlation between the effort put into the creative/art and the token's performance?
+
+
+
+
+
+
+
+Depends on the token type so if is a meme based token so usually just community all this doesen't matter same with news but if is a serious project so team behind let's say like an art token so a drawn cartoon mascot that memable and in the team there is an artist of course the website matters and all tokenomics or the paid dex or not and all that but for the rest X profile is important. Since all of them X influent a lot this space.
+
+
+
+
+
+
+
+
+
+
+
+Narrative Strength: For PVE plays like the PNUT example, the narrative is external. For others, it's created. What are the first signs that a narrative is "sticking" with the community, beyond just an increase in market cap? Is it the language used in Telegram, the number of Twitter mentions from non-KOL accounts, or something else?
+
+
+
+
+
+
+
+Narratives are always external to the space unless rare stuff like Troll so Og coins narrative (meta) or like example Alon wich is the funder of pump fun they discovered is jewish so they launched a coin about him jewish and the narrative was made from the chain so inside narrative space not outside. BUT Pve are always external because requires as the name states retailers investors or noobies.
+
+
+
+
+
+
+
+Wallet Profiling: Beyond just PnL, what defines a "smart money" wallet versus a "KOL" wallet on-chain? Does smart money tend to hold longer? Do they take profits in a specific way? Do KOL wallets often receive tokens via transfer rather than buying them on the open market?
+
+
+
+
+
+
+
+Cant tell im not good at pattern recongiztio nbut they are persons so depends each wallet.
+
+
+
+You can find pepole unkown that make millions holding for few seconds
+
+
+
+
+
+
+
+
+
+
+
+"Paying Dex" Signal: You mentioned paying for DexScreener visibility is a bullish sign. Is there an optimal time for a dev to do this? Is it more impactful at a low market cap (e.g., $50k) to attract attention, or at a higher market cap (e.g., $1M) to establish legitimacy?
+
+
+
+
+
+
+
+Yeah usually before bonding so before migrating to real luqidity the token then start to appear on dex screener because dex screener dont show tokens that have virtual liquidity so tokens that don't pay the dex before the migration is usually a bad sign. But this space is very random and also don't matter as used to in 2024. pepole care less more and more with pepole getting experience, example in 2024 telegram was the main social and pepole didn't use even platforms to trade they were manually buying but now nobody cares about telegram of a token and all thoose stuff.
+
+
+
+
+
+
+
+
+
+
+
+Healthy Dips vs. Dumps: In a fast-moving market, how do experienced traders differentiate between a healthy price correction (a "dip" worth buying) and the beginning of a coordinated dump by insiders or a dev rug pull? Are there specific on-chain indicators like a sudden drop in holder count, or specific wallets starting to sell?
+
+
+
+All traders use the 1 second interval chart in memecoins unless is a old ttoken high cap  they use like 5 minute
+
+
+
+I'm a very bad trader on this space so i can't tell you, only few know really how to trade this, but yeah a big insta dump is bad but there are shakeouts by cabals or teams to shake pepole before pumping more.
+
+
+
+I already made the  quant model that is basically a quant model and actually beat the market without having hte previlege to have insider info like tg access of groups or have talent on trading memecoins all day without missing any coins or overtrading and loosing money. I never gained money trading in 1 year of memecoin trading.
+
+
+So my next objective where i need your help on is in the next prompt get my oracle code and i will show you the data we have collected and help me to architect the pre pass model.

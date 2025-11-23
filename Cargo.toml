@@ -1,0 +1,72 @@
+cargo-features = ["edition2024"]
+
+[package]
+name = "solana-data-api"
+version = "0.1.0"
+edition = "2024"
+
+[lints.rust]
+unused_variables = "allow"
+
+[dependencies]
+solana-client = "=2.2.1"
+solana-sdk = "=2.2.1"
+solana-transaction-status = "=2.2.1"
+solana-program = "=2.2.1"
+spl-associated-token-account = "7.0.0"
+solana-accounts-db = "=2.2.1"
+mpl-token-metadata = "5.1.1"
+spl-token = { version = "4.0.0", features = ["no-entrypoint"] }
+
+yellowstone-grpc-client = "7.0.0"
+yellowstone-grpc-proto = { version = "7.0.0", default-features = false, features = ["plugin"] }
+
+anchor-lang = "0.31.0" 
+tokio = { version = "1", features = ["full"] }
+dotenvy = "0.15.7"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0.135"
+futures-util = "0.3.30"
+bs58 = "0.5.1"
+borsh = "0.10.3"
+anyhow = "1"
+futures = "0.3"
+sha2 = "0.10"
+base64 = "0.10"
+bincode = "1.3.3"
+dashmap = "5.5.3"
+
+backoff = { version = "0.4.0", features = ["tokio"] }
+
+tonic = "0.12.1"
+openssl = { version = "0.10", features = ["vendored"] }
+clickhouse = { version = "0.13.2", features = ["chrono"] }
+chrono = "0.4.38"
+serde_bytes = "0.11.17"
+async-trait = "0.1.89"
+once_cell = "1.21.3"
+
+reqwest = { version = "0.12", features = ["json", "blocking", "stream", "gzip"] }
+redis = { version = "0.32.5", features = ["tokio-comp"] }
+
+neo4rs = "0.7"
+
+itertools = "0.12.1"
+uuid = { version = "1.18.1", features = ["v4", "serde"] }
+
+oldfaithful-geyser-runner = { path = "libs/yellowstone-faithful/geyser-plugin-runner" }
+prost_011 = { package = "prost", version = "0.11" }
+solana-storage-proto = "=2.2.1"
+tokio-util = { version = "0.7.16", features = ["full"] }
+pipe = "0.4.0"
+rayon = "1.10.0"
+num_cpus = "1.17.0"
+
+
+csv = "1"
+urlencoding = "2"
+tar = "0.4"
+tempfile = "3"
+ahash = "0.8"
+zstd = "0.13"
+bzip2 = "0.4"
