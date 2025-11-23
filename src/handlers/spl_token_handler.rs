@@ -1,19 +1,24 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use clickhouse::Client;
-use redis::aio::MultiplexedConnection;
-use redis::AsyncCommands;
 use once_cell::sync::Lazy;
+use redis::AsyncCommands;
+use redis::aio::MultiplexedConnection;
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 
 use super::TransactionHandler;
 use crate::{
-    database::insert_rows, handlers::constants, spl_system_decoder, types::{BurnRow, EventPayload, EventType, TransferRow, UnifiedTransaction}, utils::{get_asset_balances, get_priority_fee, TIP_ACCOUNTS}
+    database::insert_rows,
+    handlers::constants,
+    spl_system_decoder,
+    types::{BurnRow, EventPayload, EventType, TransferRow, UnifiedTransaction},
+    utils::{TIP_ACCOUNTS, get_asset_balances, get_priority_fee},
 };
 const SPL_TOKEN_PROGRAM_ID: Pubkey = spl_token::ID;
 
-static SPAM_TRANSFER_COUNT_THRESHOLD: Lazy<usize> = Lazy::new(|| env_parse("SPL_TOKEN_SPAM_TRANSFER_COUNT_THRESHOLD", 3_usize));
+static SPAM_TRANSFER_COUNT_THRESHOLD: Lazy<usize> =
+    Lazy::new(|| env_parse("SPL_TOKEN_SPAM_TRANSFER_COUNT_THRESHOLD", 3_usize));
 
 fn env_parse<T: FromStr>(key: &str, default: T) -> T {
     std::env::var(key)
@@ -98,7 +103,6 @@ impl TransactionHandler for SplTokenHandler {
 
         // 2. Apply the filter: Skip only if there are too many transfers AND no burns.
         if !has_burn && transfer_count > *SPAM_TRANSFER_COUNT_THRESHOLD {
-           
             return Ok(Vec::new());
         }
 
@@ -106,14 +110,15 @@ impl TransactionHandler for SplTokenHandler {
         let mut burn_rows: Vec<BurnRow> = Vec::new();
         let priority_fee = get_priority_fee(tx);
 
-        
         // CORRECTED: Iterate through formatted_instructions
         for formatted_ix in &tx.formatted_instructions {
             let ix = &formatted_ix.instruction; // Get the top-level instruction
 
             if let Some(program_id) = tx.account_keys.get(ix.program_id_index as usize) {
                 if program_id == &SPL_TOKEN_PROGRAM_ID {
-                    if let Ok(Some(decoded)) = spl_system_decoder::decode_instruction(ix, &tx.account_keys) {
+                    if let Ok(Some(decoded)) =
+                        spl_system_decoder::decode_instruction(ix, &tx.account_keys)
+                    {
                         let event_type = match decoded {
                             spl_system_decoder::DecodedInstruction::SplTokenTransferChecked {
                                 source,
@@ -123,15 +128,18 @@ impl TransactionHandler for SplTokenHandler {
                                 decimals,
                                 ..
                             } => {
-
-                                if source == destination { continue; }
+                                if source == destination {
+                                    continue;
+                                }
                                 let destination_str = destination.to_string();
-                                if TIP_ACCOUNTS.contains(&destination_str.as_str()) { continue; }
+                                if TIP_ACCOUNTS.contains(&destination_str.as_str()) {
+                                    continue;
+                                }
 
-                                let (source_pre_balance, source_post_balance) = get_asset_balances(tx, &source, constants::NATIVE_MINT);
-                                let (destination_pre_balance, destination_post_balance) = get_asset_balances(tx, &destination, constants::NATIVE_MINT);
-                                
-
+                                let (source_pre_balance, source_post_balance) =
+                                    get_asset_balances(tx, &source, constants::NATIVE_MINT);
+                                let (destination_pre_balance, destination_post_balance) =
+                                    get_asset_balances(tx, &destination, constants::NATIVE_MINT);
 
                                 let transfer_row = TransferRow {
                                     signature: tx.signature.to_string(),
@@ -146,7 +154,7 @@ impl TransactionHandler for SplTokenHandler {
                                     amount,
                                     amount_decimal: amount as f64 / 10f64.powi(decimals.into()),
                                     destination_balance: destination_post_balance,
-                                    source_balance: source_post_balance,    
+                                    source_balance: source_post_balance,
                                 };
                                 Some(EventType::Transfer(transfer_row))
                             }
@@ -155,12 +163,14 @@ impl TransactionHandler for SplTokenHandler {
                                 destination,
                                 authority,
                                 amount,
-
                             } => {
-
-                                if source == destination { continue; }
+                                if source == destination {
+                                    continue;
+                                }
                                 let destination_str = destination.to_string();
-                                if TIP_ACCOUNTS.contains(&destination_str.as_str()) { continue; }
+                                if TIP_ACCOUNTS.contains(&destination_str.as_str()) {
+                                    continue;
+                                }
 
                                 let mut found_mint_str: Option<String> = None;
                                 let mut found_decimals: Option<u8> = None;
@@ -168,7 +178,9 @@ impl TransactionHandler for SplTokenHandler {
                                 // --- THE KEY CHANGE: We go back to using `source` for the lookup. ---
                                 // This now works because the balance map is keyed by Token Accounts.
                                 for (mint_key, balance_map) in &tx.pre_balances {
-                                    if mint_key == constants::NATIVE_MINT { continue; }
+                                    if mint_key == constants::NATIVE_MINT {
+                                        continue;
+                                    }
 
                                     if balance_map.contains_key(&source.to_string()) {
                                         found_mint_str = Some(mint_key.clone());
@@ -179,9 +191,13 @@ impl TransactionHandler for SplTokenHandler {
                                     }
                                 }
 
-                                if let (Some(mint_address), Some(decimals)) = (found_mint_str, found_decimals) {
-                                    let (_, source_post_balance) = get_asset_balances(tx, &source, &mint_address);
-                                    let (_, destination_post_balance) = get_asset_balances(tx, &destination, &mint_address);
+                                if let (Some(mint_address), Some(decimals)) =
+                                    (found_mint_str, found_decimals)
+                                {
+                                    let (_, source_post_balance) =
+                                        get_asset_balances(tx, &source, &mint_address);
+                                    let (_, destination_post_balance) =
+                                        get_asset_balances(tx, &destination, &mint_address);
 
                                     let transfer_rows = TransferRow {
                                         signature: tx.signature.to_string(),
@@ -200,7 +216,10 @@ impl TransactionHandler for SplTokenHandler {
                                     };
                                     Some(EventType::Transfer(transfer_rows))
                                 } else {
-                                    println!("[splToken] WARN: Could not determine mint for transfer. Source account {} was not found in any pre_balance map.", source);
+                                    println!(
+                                        "[splToken] WARN: Could not determine mint for transfer. Source account {} was not found in any pre_balance map.",
+                                        source
+                                    );
                                     None
                                 }
                             }
@@ -210,11 +229,15 @@ impl TransactionHandler for SplTokenHandler {
                                 amount,
                                 ..
                             } => {
-                                let decimals = tx.token_decimals.get(&mint.to_string()).cloned().unwrap_or(0);
+                                let decimals = tx
+                                    .token_decimals
+                                    .get(&mint.to_string())
+                                    .cloned()
+                                    .unwrap_or(0);
 
                                 // Get the post-burn token balance of the source account
-                                let (source_pre_balance, source_post_balance) = get_asset_balances(tx, &source_account, &mint.to_string());
-
+                                let (source_pre_balance, source_post_balance) =
+                                    get_asset_balances(tx, &source_account, &mint.to_string());
 
                                 let burn_rows = BurnRow {
                                     signature: tx.signature.to_string(),
@@ -231,15 +254,15 @@ impl TransactionHandler for SplTokenHandler {
                                 };
                                 Some(EventType::Burn(burn_rows))
                             }
-                            _ => None
+                            _ => None,
                         };
 
                         if let Some(event) = event_type {
-                            events.push(EventPayload { 
+                            events.push(EventPayload {
                                 timestamp: tx.block_time,
-                                event: event, 
-                                balances: tx.post_balances.clone(), 
-                                token_decimals: tx.token_decimals.clone() 
+                                event: event,
+                                balances: tx.post_balances.clone(),
+                                token_decimals: tx.token_decimals.clone(),
                             })
                         }
                     }

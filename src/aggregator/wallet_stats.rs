@@ -1,27 +1,33 @@
 use crate::database::insert_rows;
+use crate::handlers::constants::{NATIVE_MINT, USD1_MINT, USDC_MINT, USDT_MINT};
 use crate::services::price_service::PriceService;
-use crate::types::{EventPayload, EventType, MintRow, TradeRow, TransferRow, WalletHoldingRow, WalletProfileMetricsRow, WalletProfileRow};
-use anyhow::{anyhow, Result};
+use crate::types::{
+    EventPayload, EventType, MintRow, TradeRow, TransferRow, WalletHoldingRow,
+    WalletProfileMetricsRow, WalletProfileRow,
+};
+use anyhow::{Result, anyhow};
 use chrono::{DateTime, Datelike, TimeZone, Utc};
 use clickhouse::Client;
 use futures::stream::StreamExt;
+use once_cell::sync::Lazy;
 use redis::FromRedisValue;
-use redis::{aio::MultiplexedConnection, AsyncCommands, Client as RedisClient};
 use redis::streams::{StreamReadOptions, StreamReadReply};
+use redis::{AsyncCommands, Client as RedisClient, aio::MultiplexedConnection};
 use solana_sdk::native_token::LAMPORTS_PER_SOL;
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
 use std::convert::TryFrom;
 use std::str::FromStr;
-use crate::handlers::constants::{NATIVE_MINT, USDC_MINT, USDT_MINT, USD1_MINT};
-use once_cell::sync::Lazy;
+use std::time::Duration;
 
 type ProfileCache = HashMap<String, WalletProfileEntry>;
 type HoldingsCache = HashMap<(String, String), WalletHoldingRow>;
 
-static FUNDING_THRESHOLD_SOL: Lazy<f64> = Lazy::new(|| env_parse("WALLET_FUNDING_THRESHOLD_SOL", 0.003_f64));
-static WALLET_STATS_REDIS_READ_COUNT: Lazy<usize> = Lazy::new(|| env_parse("WALLET_STATS_REDIS_READ_COUNT", 500_usize));
-static WALLET_STATS_REDIS_BLOCK_MS: Lazy<u64> = Lazy::new(|| env_parse("WALLET_STATS_REDIS_BLOCK_MS", 2000_u64));
+static FUNDING_THRESHOLD_SOL: Lazy<f64> =
+    Lazy::new(|| env_parse("WALLET_FUNDING_THRESHOLD_SOL", 0.003_f64));
+static WALLET_STATS_REDIS_READ_COUNT: Lazy<usize> =
+    Lazy::new(|| env_parse("WALLET_STATS_REDIS_READ_COUNT", 500_usize));
+static WALLET_STATS_REDIS_BLOCK_MS: Lazy<u64> =
+    Lazy::new(|| env_parse("WALLET_STATS_REDIS_BLOCK_MS", 2000_u64));
 
 fn env_parse<T: FromStr>(key: &str, default: T) -> T {
     std::env::var(key)
@@ -49,7 +55,6 @@ impl TryFrom<u8> for TradeType {
     }
 }
 
-
 pub struct WalletAggregator {
     db_client: Client,
     redis_conn: MultiplexedConnection,
@@ -62,9 +67,12 @@ impl WalletAggregator {
         redis_client: RedisClient,
         price_service: PriceService,
     ) -> Result<Self> {
-
         let redis_conn = redis_client.get_multiplexed_async_connection().await?;
-        Ok(Self { db_client, redis_conn, price_service })
+        Ok(Self {
+            db_client,
+            redis_conn,
+            price_service,
+        })
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -83,12 +91,21 @@ impl WalletAggregator {
             // It's okay if the group already exists. Any other error is a problem.
             if !e.to_string().contains("BUSYGROUP") {
                 // This is a real error, so we exit.
-                return Err(anyhow!("Failed to create or connect to consumer group: {}", e));
+                return Err(anyhow!(
+                    "Failed to create or connect to consumer group: {}",
+                    e
+                ));
             }
             // If it's a BUSYGROUP error, we just print a confirmation and continue.
-            println!("[walletAggregator] Consumer group '{}' already exists. Resuming.", group_name);
+            println!(
+                "[walletAggregator] Consumer group '{}' already exists. Resuming.",
+                group_name
+            );
         } else {
-            println!("[walletAggregator] Created new consumer group '{}' on stream '{}'.", group_name, stream_key);
+            println!(
+                "[walletAggregator] Created new consumer group '{}' on stream '{}'.",
+                group_name, stream_key
+            );
         }
 
         // --- Setup for the publisher ---
@@ -97,10 +114,20 @@ impl WalletAggregator {
 
         loop {
             // Fetch a batch using the new stream-based function
-            let messages = match collect_events_from_stream(&self.redis_conn, stream_key, group_name, &consumer_name).await {
+            let messages = match collect_events_from_stream(
+                &self.redis_conn,
+                stream_key,
+                group_name,
+                &consumer_name,
+            )
+            .await
+            {
                 Ok(msgs) => msgs,
                 Err(e) => {
-                    eprintln!("[walletAggregator] Error reading from Redis Stream: {}. Retrying...", e);
+                    eprintln!(
+                        "[walletAggregator] Error reading from Redis Stream: {}. Retrying...",
+                        e
+                    );
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     continue;
                 }
@@ -112,16 +139,21 @@ impl WalletAggregator {
 
             // Extract just the payloads for processing, but keep the IDs for acknowledging
             let message_ids: Vec<String> = messages.iter().map(|(id, _)| id.clone()).collect();
-            let payloads: Vec<EventPayload> = messages.into_iter().map(|(_, payload)| payload).collect();
+            let payloads: Vec<EventPayload> =
+                messages.into_iter().map(|(_, payload)| payload).collect();
 
             // Process the batch as before
             match self.process_batch(payloads.clone()).await {
                 Ok(_) => {
-                    println!("[walletAggregator] ✅ Batch processed successfully. Forwarding to LinkGraph.");
+                    println!(
+                        "[walletAggregator] ✅ Batch processed successfully. Forwarding to LinkGraph."
+                    );
                     // Forward to the next queue
                     for payload in payloads {
                         let payload_data = bincode::serialize(&payload)?;
-                        let _: () = publisher_conn.xadd(link_graph_queue, "*", &[("payload", payload_data)]).await?;
+                        let _: () = publisher_conn
+                            .xadd(link_graph_queue, "*", &[("payload", payload_data)])
+                            .await?;
                     }
                     // IMPORTANT: Acknowledge the messages from the source queue
                     if !message_ids.is_empty() {
@@ -130,14 +162,24 @@ impl WalletAggregator {
                             .xack(stream_key, group_name, &message_ids)
                             .await;
                         if let Err(e) = result {
-                            eprintln!("[walletAggregator] 🔴 FAILED to acknowledge messages: {}", e);
-                        } else if let Err(e) = self.redis_conn.xdel::<_, _, i64>(stream_key, &message_ids).await {
+                            eprintln!(
+                                "[walletAggregator] 🔴 FAILED to acknowledge messages: {}",
+                                e
+                            );
+                        } else if let Err(e) = self
+                            .redis_conn
+                            .xdel::<_, _, i64>(stream_key, &message_ids)
+                            .await
+                        {
                             eprintln!("[walletAggregator] 🔴 FAILED to delete messages: {}", e);
                         }
                     }
                 }
                 Err(e) => {
-                    println!("[walletAggregator] ❌ Failed to process batch, will not forward or ACK. Error: {}", e);
+                    println!(
+                        "[walletAggregator] ❌ Failed to process batch, will not forward or ACK. Error: {}",
+                        e
+                    );
                 }
             }
         }
@@ -232,8 +274,9 @@ impl WalletAggregator {
         for payload in payloads.iter() {
             match &payload.event {
                 EventType::Trade(trade) => {
-                    if let Err(err) =
-                        self.process_trade(trade, payload, &mut profiles, &mut holdings).await
+                    if let Err(err) = self
+                        .process_trade(trade, payload, &mut profiles, &mut holdings)
+                        .await
                     {
                         println!(
                             "[walletStats] WARN failed to process trade {}, skipping. Error: {}",
@@ -241,15 +284,13 @@ impl WalletAggregator {
                         );
                     }
                 }
-                EventType::Transfer(transfer) => {
-                    self.process_transfer(
-                        transfer,
-                        payload,
-                        &mut profiles,
-                        &mut holdings,
-                        &new_tags,
-                    )
-                }
+                EventType::Transfer(transfer) => self.process_transfer(
+                    transfer,
+                    payload,
+                    &mut profiles,
+                    &mut holdings,
+                    &new_tags,
+                ),
                 EventType::Mint(mint) => self.process_mint(mint, &mut profiles),
                 _ => {}
             }
@@ -260,9 +301,13 @@ impl WalletAggregator {
     }
 
     fn process_mint(&self, mint: &MintRow, profiles: &mut ProfileCache) {
-        let entry = profiles.entry(mint.creator_address.clone()).or_insert_with(|| WalletProfileEntry::new(mint.creator_address.clone(), mint.timestamp));
+        let entry = profiles
+            .entry(mint.creator_address.clone())
+            .or_insert_with(|| {
+                WalletProfileEntry::new(mint.creator_address.clone(), mint.timestamp)
+            });
         let profile = &mut entry.profile;
-        
+
         profile.updated_at = mint.timestamp;
         profile.last_seen_ts = profile.last_seen_ts.max(mint.timestamp);
 
@@ -271,19 +316,45 @@ impl WalletAggregator {
         }
     }
 
-    async fn process_trade(&self, trade: &TradeRow, payload: &EventPayload, profiles: &mut ProfileCache, holdings: &mut HoldingsCache) -> Result<()> {
-        let entry = profiles.entry(trade.maker.clone()).or_insert_with(|| WalletProfileEntry::new(trade.maker.clone(), trade.timestamp));
-        
-        let native_price = self.price_service.get_price(trade.timestamp).await;
-        
-        let (holding_period_update, realized_profit_sol, realized_profit_usd) = if trade.base_address != NATIVE_MINT {
-            let holding = holdings.entry((trade.maker.clone(), trade.base_address.clone())).or_insert_with(|| WalletHoldingRow::new(trade.maker.clone(), trade.base_address.clone(), trade.timestamp));
-            self.update_holding_from_trade(holding, trade, payload, native_price).await?
-        } else {
-            (0.0, 0.0, 0.0)
-        };
+    async fn process_trade(
+        &self,
+        trade: &TradeRow,
+        payload: &EventPayload,
+        profiles: &mut ProfileCache,
+        holdings: &mut HoldingsCache,
+    ) -> Result<()> {
+        let entry = profiles
+            .entry(trade.maker.clone())
+            .or_insert_with(|| WalletProfileEntry::new(trade.maker.clone(), trade.timestamp));
 
-        self.update_profile_from_trade(entry, trade, payload, native_price, holding_period_update, realized_profit_sol, realized_profit_usd);
+        let native_price = self.price_service.get_price(trade.timestamp).await;
+
+        let (holding_period_update, realized_profit_sol, realized_profit_usd) =
+            if trade.base_address != NATIVE_MINT {
+                let holding = holdings
+                    .entry((trade.maker.clone(), trade.base_address.clone()))
+                    .or_insert_with(|| {
+                        WalletHoldingRow::new(
+                            trade.maker.clone(),
+                            trade.base_address.clone(),
+                            trade.timestamp,
+                        )
+                    });
+                self.update_holding_from_trade(holding, trade, payload, native_price)
+                    .await?
+            } else {
+                (0.0, 0.0, 0.0)
+            };
+
+        self.update_profile_from_trade(
+            entry,
+            trade,
+            payload,
+            native_price,
+            holding_period_update,
+            realized_profit_sol,
+            realized_profit_usd,
+        );
         Ok(())
     }
 
@@ -305,10 +376,8 @@ impl WalletAggregator {
             .get(&trade.quote_address)
             .cloned()
             .unwrap_or(9);
-        let base_amount_decimal =
-            trade.base_amount as f64 / 10f64.powi(base_decimals as i32);
-        let quote_amount_decimal =
-            trade.quote_amount as f64 / 10f64.powi(quote_decimals as i32);
+        let base_amount_decimal = trade.base_amount as f64 / 10f64.powi(base_decimals as i32);
+        let quote_amount_decimal = trade.quote_amount as f64 / 10f64.powi(quote_decimals as i32);
 
         let trade_total_in_sol = self.convert_to_sol(
             quote_amount_decimal,
@@ -335,8 +404,7 @@ impl WalletAggregator {
                 let sold_amount = base_amount_decimal.min(pre_balance);
                 holding.history_sold_amount += base_amount_decimal;
                 holding.history_sold_income_sol += trade_total_in_sol;
-                holding.current_balance =
-                    (holding.current_balance - base_amount_decimal).max(0.0);
+                holding.current_balance = (holding.current_balance - base_amount_decimal).max(0.0);
 
                 let avg_cost_per_token = if holding.history_bought_amount > 0.0 {
                     holding.history_bought_cost_sol
@@ -351,15 +419,20 @@ impl WalletAggregator {
                 holding.realized_profit_sol += realized_profit_sol;
                 holding.realized_profit_usd += realized_profit_usd;
                 // Reduce basis to reflect sold amount.
-                holding.history_bought_amount = (holding.history_bought_amount - sold_amount).max(0.0);
-                holding.history_bought_cost_sol = (holding.history_bought_cost_sol - cost_basis_sol).max(0.0);
+                holding.history_bought_amount =
+                    (holding.history_bought_amount - sold_amount).max(0.0);
+                holding.history_bought_cost_sol =
+                    (holding.history_bought_cost_sol - cost_basis_sol).max(0.0);
                 if holding.history_bought_cost_sol > 0.0 {
                     holding.realized_profit_pnl =
                         (holding.realized_profit_sol / holding.history_bought_cost_sol) as f32;
                 }
 
                 // Holding period update: only when selling from an existing position.
-                if sold_amount > 0.0 && holding.start_holding_at > 0 && trade.timestamp > holding.start_holding_at {
+                if sold_amount > 0.0
+                    && holding.start_holding_at > 0
+                    && trade.timestamp > holding.start_holding_at
+                {
                     holding_period_update = (trade.timestamp - holding.start_holding_at) as f64;
                 }
                 // If position is closed, reset holding start.
@@ -370,9 +443,13 @@ impl WalletAggregator {
         }
 
         holding.updated_at = trade.timestamp;
-        Ok((holding_period_update, realized_profit_sol, realized_profit_usd))
+        Ok((
+            holding_period_update,
+            realized_profit_sol,
+            realized_profit_usd,
+        ))
     }
-    
+
     fn update_profile_from_trade(
         &self,
         entry: &mut WalletProfileEntry,
@@ -392,37 +469,58 @@ impl WalletAggregator {
         self.reset_periodic_stats_if_needed(metrics, event_time);
         let trade_type = TradeType::try_from(trade.trade_type).unwrap();
 
-        let quote_decimals = payload.token_decimals.get(&trade.quote_address).cloned().unwrap_or(9);
+        let quote_decimals = payload
+            .token_decimals
+            .get(&trade.quote_address)
+            .cloned()
+            .unwrap_or(9);
         let quote_amount_decimal = trade.quote_amount as f64 / 10f64.powi(quote_decimals as i32);
-        let trade_total_in_sol = self.convert_to_sol(quote_amount_decimal, &trade.quote_address, trade.total_usd, native_price);
+        let trade_total_in_sol = self.convert_to_sol(
+            quote_amount_decimal,
+            &trade.quote_address,
+            trade.total_usd,
+            native_price,
+        );
         let trade_total_in_usd = trade.total_usd;
 
         // --- Periodic Stats Calculation (1D, 7D, 30D) ---
         let mut stats_1d = (
-            metrics.stats_1d_buy_count, metrics.stats_1d_sell_count, 
-            metrics.stats_1d_total_bought_cost_sol, metrics.stats_1d_total_bought_cost_usd,
-            metrics.stats_1d_total_sold_income_sol, metrics.stats_1d_total_sold_income_usd,
-            metrics.stats_1d_realized_profit_sol, metrics.stats_1d_realized_profit_usd,
+            metrics.stats_1d_buy_count,
+            metrics.stats_1d_sell_count,
+            metrics.stats_1d_total_bought_cost_sol,
+            metrics.stats_1d_total_bought_cost_usd,
+            metrics.stats_1d_total_sold_income_sol,
+            metrics.stats_1d_total_sold_income_usd,
+            metrics.stats_1d_realized_profit_sol,
+            metrics.stats_1d_realized_profit_usd,
             metrics.stats_1d_winrate * metrics.stats_1d_sell_count as f32, // win count
             metrics.stats_1d_avg_holding_period,
         );
         let mut stats_7d = (
-            metrics.stats_7d_buy_count, metrics.stats_7d_sell_count,
-            metrics.stats_7d_total_bought_cost_sol, metrics.stats_7d_total_bought_cost_usd,
-            metrics.stats_7d_total_sold_income_sol, metrics.stats_7d_total_sold_income_usd,
-            metrics.stats_7d_realized_profit_sol, metrics.stats_7d_realized_profit_usd,
+            metrics.stats_7d_buy_count,
+            metrics.stats_7d_sell_count,
+            metrics.stats_7d_total_bought_cost_sol,
+            metrics.stats_7d_total_bought_cost_usd,
+            metrics.stats_7d_total_sold_income_sol,
+            metrics.stats_7d_total_sold_income_usd,
+            metrics.stats_7d_realized_profit_sol,
+            metrics.stats_7d_realized_profit_usd,
             metrics.stats_7d_winrate * metrics.stats_7d_sell_count as f32, // win count
             metrics.stats_7d_avg_holding_period,
         );
         let mut stats_30d = (
-            metrics.stats_30d_buy_count, metrics.stats_30d_sell_count,
-            metrics.stats_30d_total_bought_cost_sol, metrics.stats_30d_total_bought_cost_usd,
-            metrics.stats_30d_total_sold_income_sol, metrics.stats_30d_total_sold_income_usd,
-            metrics.stats_30d_realized_profit_sol, metrics.stats_30d_realized_profit_usd,
+            metrics.stats_30d_buy_count,
+            metrics.stats_30d_sell_count,
+            metrics.stats_30d_total_bought_cost_sol,
+            metrics.stats_30d_total_bought_cost_usd,
+            metrics.stats_30d_total_sold_income_sol,
+            metrics.stats_30d_total_sold_income_usd,
+            metrics.stats_30d_realized_profit_sol,
+            metrics.stats_30d_realized_profit_usd,
             metrics.stats_30d_winrate * metrics.stats_30d_sell_count as f32, // win count
             metrics.stats_30d_avg_holding_period,
         );
-        
+
         // --- Total Stats Calculation ---
         let previous_total_wins = metrics.total_winrate * metrics.total_sells_count as f32;
         let mut new_total_buys = metrics.total_buys_count;
@@ -431,49 +529,112 @@ impl WalletAggregator {
 
         if trade_type == TradeType::Buy {
             new_total_buys += 1;
-            stats_1d.0 += 1; stats_1d.2 += trade_total_in_sol; stats_1d.3 += trade_total_in_usd;
-            stats_7d.0 += 1; stats_7d.2 += trade_total_in_sol; stats_7d.3 += trade_total_in_usd;
-            stats_30d.0 += 1; stats_30d.2 += trade_total_in_sol; stats_30d.3 += trade_total_in_usd;
-        } else { // Sell
+            stats_1d.0 += 1;
+            stats_1d.2 += trade_total_in_sol;
+            stats_1d.3 += trade_total_in_usd;
+            stats_7d.0 += 1;
+            stats_7d.2 += trade_total_in_sol;
+            stats_7d.3 += trade_total_in_usd;
+            stats_30d.0 += 1;
+            stats_30d.2 += trade_total_in_sol;
+            stats_30d.3 += trade_total_in_usd;
+        } else {
+            // Sell
             new_total_sells += 1;
-            if realized_profit_sol >= 0.0 { 
+            if realized_profit_sol >= 0.0 {
                 current_total_wins += 1.0;
                 stats_1d.8 += 1.0;
                 stats_7d.8 += 1.0;
                 stats_30d.8 += 1.0;
             }
-            stats_1d.1 += 1; stats_1d.4 += trade_total_in_sol; stats_1d.5 += trade_total_in_usd; stats_1d.6 += realized_profit_sol; stats_1d.7 += realized_profit_usd;
-            stats_7d.1 += 1; stats_7d.4 += trade_total_in_sol; stats_7d.5 += trade_total_in_usd; stats_7d.6 += realized_profit_sol; stats_7d.7 += realized_profit_usd;
-            stats_30d.1 += 1; stats_30d.4 += trade_total_in_sol; stats_30d.5 += trade_total_in_usd; stats_30d.6 += realized_profit_sol; stats_30d.7 += realized_profit_usd;
+            stats_1d.1 += 1;
+            stats_1d.4 += trade_total_in_sol;
+            stats_1d.5 += trade_total_in_usd;
+            stats_1d.6 += realized_profit_sol;
+            stats_1d.7 += realized_profit_usd;
+            stats_7d.1 += 1;
+            stats_7d.4 += trade_total_in_sol;
+            stats_7d.5 += trade_total_in_usd;
+            stats_7d.6 += realized_profit_sol;
+            stats_7d.7 += realized_profit_usd;
+            stats_30d.1 += 1;
+            stats_30d.4 += trade_total_in_sol;
+            stats_30d.5 += trade_total_in_usd;
+            stats_30d.6 += realized_profit_sol;
+            stats_30d.7 += realized_profit_usd;
         }
 
         // Track token count per window (per trade event).
         metrics.stats_1d_tokens_traded += 1;
         metrics.stats_7d_tokens_traded += 1;
         metrics.stats_30d_tokens_traded += 1;
-        
-        let new_total_winrate = if new_total_sells > 0 { current_total_wins / new_total_sells as f32 } else { 0.0 };
+
+        let new_total_winrate = if new_total_sells > 0 {
+            current_total_wins / new_total_sells as f32
+        } else {
+            0.0
+        };
 
         // --- Finalize Periodic Stats ---
         if holding_period_update > 0.0 {
-            if stats_1d.1 > 0 { let prev = (stats_1d.1 - 1) as f64; stats_1d.9 = ((stats_1d.9 as f64 * prev + holding_period_update) / stats_1d.1 as f64) as f32; }
-            if stats_7d.1 > 0 { let prev = (stats_7d.1 - 1) as f64; stats_7d.9 = ((stats_7d.9 as f64 * prev + holding_period_update) / stats_7d.1 as f64) as f32; }
-            if stats_30d.1 > 0 { let prev = (stats_30d.1 - 1) as f64; stats_30d.9 = ((stats_30d.9 as f64 * prev + holding_period_update) / stats_30d.1 as f64) as f32; }
+            if stats_1d.1 > 0 {
+                let prev = (stats_1d.1 - 1) as f64;
+                stats_1d.9 =
+                    ((stats_1d.9 as f64 * prev + holding_period_update) / stats_1d.1 as f64) as f32;
+            }
+            if stats_7d.1 > 0 {
+                let prev = (stats_7d.1 - 1) as f64;
+                stats_7d.9 =
+                    ((stats_7d.9 as f64 * prev + holding_period_update) / stats_7d.1 as f64) as f32;
+            }
+            if stats_30d.1 > 0 {
+                let prev = (stats_30d.1 - 1) as f64;
+                stats_30d.9 = ((stats_30d.9 as f64 * prev + holding_period_update)
+                    / stats_30d.1 as f64) as f32;
+            }
         }
-        let final_winrate_1d = if stats_1d.1 > 0 { stats_1d.8 / stats_1d.1 as f32 } else { 0.0 };
-        let stats_1d_realized_profit_pnl = if stats_1d.2 > 0.0 { (stats_1d.6 / stats_1d.2) as f32 } else { 0.0 };
-        let final_winrate_7d = if stats_7d.1 > 0 { stats_7d.8 / stats_7d.1 as f32 } else { 0.0 };
-        let stats_7d_realized_profit_pnl = if stats_7d.2 > 0.0 { (stats_7d.6 / stats_7d.2) as f32 } else { 0.0 };
-        let final_winrate_30d = if stats_30d.1 > 0 { stats_30d.8 / stats_30d.1 as f32 } else { 0.0 };
-        let stats_30d_realized_profit_pnl = if stats_30d.2 > 0.0 { (stats_30d.6 / stats_30d.2) as f32 } else { 0.0 };
+        let final_winrate_1d = if stats_1d.1 > 0 {
+            stats_1d.8 / stats_1d.1 as f32
+        } else {
+            0.0
+        };
+        let stats_1d_realized_profit_pnl = if stats_1d.2 > 0.0 {
+            (stats_1d.6 / stats_1d.2) as f32
+        } else {
+            0.0
+        };
+        let final_winrate_7d = if stats_7d.1 > 0 {
+            stats_7d.8 / stats_7d.1 as f32
+        } else {
+            0.0
+        };
+        let stats_7d_realized_profit_pnl = if stats_7d.2 > 0.0 {
+            (stats_7d.6 / stats_7d.2) as f32
+        } else {
+            0.0
+        };
+        let final_winrate_30d = if stats_30d.1 > 0 {
+            stats_30d.8 / stats_30d.1 as f32
+        } else {
+            0.0
+        };
+        let stats_30d_realized_profit_pnl = if stats_30d.2 > 0.0 {
+            (stats_30d.6 / stats_30d.2) as f32
+        } else {
+            0.0
+        };
 
         profile.updated_at = trade.timestamp;
         profile.last_seen_ts = profile.last_seen_ts.max(trade.timestamp);
         metrics.updated_at = trade.timestamp;
 
-            if let Some(lamports) = payload.balances.get(NATIVE_MINT).and_then(|b| b.get(&trade.maker)) {
-                metrics.balance = *lamports as f64 / LAMPORTS_PER_SOL as f64;
-            }
+        if let Some(lamports) = payload
+            .balances
+            .get(NATIVE_MINT)
+            .and_then(|b| b.get(&trade.maker))
+        {
+            metrics.balance = *lamports as f64 / LAMPORTS_PER_SOL as f64;
+        }
 
         metrics.total_buys_count = new_total_buys;
         metrics.total_sells_count = new_total_sells;
@@ -518,14 +679,19 @@ impl WalletAggregator {
         metrics.stats_30d_winrate = final_winrate_30d;
         metrics.stats_30d_total_fee += trade.priority_fee;
     }
-    
-    fn reset_periodic_stats_if_needed(&self, metrics: &mut WalletProfileMetricsRow, event_time: DateTime<Utc>) {
+
+    fn reset_periodic_stats_if_needed(
+        &self,
+        metrics: &mut WalletProfileMetricsRow,
+        event_time: DateTime<Utc>,
+    ) {
         let last_update = Utc
             .timestamp_opt(metrics.updated_at as i64, 0)
             .single()
             .unwrap_or(event_time);
 
-        if event_time.ordinal() != last_update.ordinal() || event_time.year() != last_update.year() {
+        if event_time.ordinal() != last_update.ordinal() || event_time.year() != last_update.year()
+        {
             metrics.stats_1d_buy_count = 0;
             metrics.stats_1d_sell_count = 0;
             metrics.stats_1d_total_bought_cost_sol = 0.0;
@@ -543,7 +709,9 @@ impl WalletAggregator {
             metrics.stats_1d_total_fee = 0.0;
         }
 
-        if event_time.iso_week().week() != last_update.iso_week().week() || event_time.year() != last_update.year() {
+        if event_time.iso_week().week() != last_update.iso_week().week()
+            || event_time.year() != last_update.year()
+        {
             metrics.stats_7d_buy_count = 0;
             metrics.stats_7d_sell_count = 0;
             metrics.stats_7d_total_bought_cost_sol = 0.0;
@@ -581,12 +749,12 @@ impl WalletAggregator {
     }
 
     fn process_transfer(
-        &self, 
-        transfer: &TransferRow, 
-        payload: &EventPayload, 
-        profiles: &mut ProfileCache, 
+        &self,
+        transfer: &TransferRow,
+        payload: &EventPayload,
+        profiles: &mut ProfileCache,
         holdings: &mut HoldingsCache,
-        new_tags: &HashMap<String, Vec<String>> // ADD this parameter
+        new_tags: &HashMap<String, Vec<String>>, // ADD this parameter
     ) {
         let event_time = Utc
             .timestamp_opt(transfer.timestamp as i64, 0)
@@ -594,80 +762,103 @@ impl WalletAggregator {
             .unwrap_or_else(|| Utc::now());
         let event_ts = transfer.timestamp;
 
-        let process_wallet = |wallet_address: &String, is_source: bool, profiles: &mut ProfileCache| {
-            let entry = profiles.entry(wallet_address.clone()).or_insert_with(|| {
-                let mut new_entry = WalletProfileEntry::new(wallet_address.clone(), transfer.timestamp);
-                if let Some(tags) = new_tags.get(wallet_address) {
-                    new_entry.profile.tags = tags.clone();
+        let process_wallet =
+            |wallet_address: &String, is_source: bool, profiles: &mut ProfileCache| {
+                let entry = profiles.entry(wallet_address.clone()).or_insert_with(|| {
+                    let mut new_entry =
+                        WalletProfileEntry::new(wallet_address.clone(), transfer.timestamp);
+                    if let Some(tags) = new_tags.get(wallet_address) {
+                        new_entry.profile.tags = tags.clone();
+                    }
+                    new_entry
+                });
+
+                if entry.profile.tags.is_empty() {
+                    if let Some(tags) = new_tags.get(wallet_address) {
+                        entry.profile.tags = tags.clone();
+                    }
                 }
-                new_entry
-            });
 
-            if entry.profile.tags.is_empty() {
-                if let Some(tags) = new_tags.get(wallet_address) {
-                    entry.profile.tags = tags.clone();
-                }
-            }
+                let profile = &mut entry.profile;
+                let metrics = &mut entry.metrics;
+                self.reset_periodic_stats_if_needed(metrics, event_time);
+                profile.updated_at = event_ts;
+                profile.last_seen_ts = profile.last_seen_ts.max(transfer.timestamp);
+                metrics.updated_at = event_ts;
 
-            let profile = &mut entry.profile;
-            let metrics = &mut entry.metrics;
-            self.reset_periodic_stats_if_needed(metrics, event_time);
-            profile.updated_at = event_ts;
-            profile.last_seen_ts = profile.last_seen_ts.max(transfer.timestamp);
-            metrics.updated_at = event_ts;
-
-            if let Some(lamports) = payload.balances.get(NATIVE_MINT).and_then(|b| b.get(wallet_address)) {
-                metrics.balance = *lamports as f64 / LAMPORTS_PER_SOL as f64;
-            }
-
-            let is_spl = transfer.mint_address != NATIVE_MINT;
-
-            if !is_source && !is_spl {
-                let post_balance_lamports = payload
+                if let Some(lamports) = payload
                     .balances
                     .get(NATIVE_MINT)
                     .and_then(|b| b.get(wallet_address))
-                    .cloned()
-                    .unwrap_or(0);
-
-                let post_balance_sol = post_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
-                let pre_balance_sol = post_balance_sol - transfer.amount_decimal;
-                if pre_balance_sol <= *FUNDING_THRESHOLD_SOL {
-                    profile.funded_from = transfer.source.clone();
-                    profile.funded_timestamp = transfer.timestamp;
-                    profile.funded_signature = transfer.signature.clone();
-                    profile.funded_amount = transfer.amount_decimal;
+                {
+                    metrics.balance = *lamports as f64 / LAMPORTS_PER_SOL as f64;
                 }
-            }
 
-            if is_source {
-                if is_spl { metrics.spl_transfers_out_count += 1; } else { metrics.transfers_out_count += 1; }
-                metrics.stats_7d_transfer_out_count += 1;
-                metrics.stats_30d_transfer_out_count += 1;
-                metrics.stats_1d_transfer_out_count += 1;
-            } else {
-                if is_spl { metrics.spl_transfers_in_count += 1; } else { metrics.transfers_in_count += 1; }
-                metrics.stats_7d_transfer_in_count += 1;
-                metrics.stats_30d_transfer_in_count += 1;
-                metrics.stats_1d_transfer_in_count += 1;
-            }
-        };
-        
-        let process_holding = |wallet_address: &String, is_source: bool, holdings: &mut HoldingsCache| {
-            if transfer.mint_address == NATIVE_MINT { return; }
-            let holding_key = (wallet_address.clone(), transfer.mint_address.clone());
-            let holding = holdings.entry(holding_key).or_insert_with(|| WalletHoldingRow::new(wallet_address.clone(), transfer.mint_address.clone(), transfer.timestamp));
-            
-            holding.updated_at = event_ts;
-            
-            if is_source {
-                holding.current_balance = transfer.source_balance;
-                holding.history_transfer_out += 1;
-            } else {
-                holding.current_balance = transfer.destination_balance;
-                holding.history_transfer_in += 1;
-            }
-        };
+                let is_spl = transfer.mint_address != NATIVE_MINT;
+
+                if !is_source && !is_spl {
+                    let post_balance_lamports = payload
+                        .balances
+                        .get(NATIVE_MINT)
+                        .and_then(|b| b.get(wallet_address))
+                        .cloned()
+                        .unwrap_or(0);
+
+                    let post_balance_sol = post_balance_lamports as f64 / LAMPORTS_PER_SOL as f64;
+                    let pre_balance_sol = post_balance_sol - transfer.amount_decimal;
+                    if pre_balance_sol <= *FUNDING_THRESHOLD_SOL {
+                        profile.funded_from = transfer.source.clone();
+                        profile.funded_timestamp = transfer.timestamp;
+                        profile.funded_signature = transfer.signature.clone();
+                        profile.funded_amount = transfer.amount_decimal;
+                    }
+                }
+
+                if is_source {
+                    if is_spl {
+                        metrics.spl_transfers_out_count += 1;
+                    } else {
+                        metrics.transfers_out_count += 1;
+                    }
+                    metrics.stats_7d_transfer_out_count += 1;
+                    metrics.stats_30d_transfer_out_count += 1;
+                    metrics.stats_1d_transfer_out_count += 1;
+                } else {
+                    if is_spl {
+                        metrics.spl_transfers_in_count += 1;
+                    } else {
+                        metrics.transfers_in_count += 1;
+                    }
+                    metrics.stats_7d_transfer_in_count += 1;
+                    metrics.stats_30d_transfer_in_count += 1;
+                    metrics.stats_1d_transfer_in_count += 1;
+                }
+            };
+
+        let process_holding =
+            |wallet_address: &String, is_source: bool, holdings: &mut HoldingsCache| {
+                if transfer.mint_address == NATIVE_MINT {
+                    return;
+                }
+                let holding_key = (wallet_address.clone(), transfer.mint_address.clone());
+                let holding = holdings.entry(holding_key).or_insert_with(|| {
+                    WalletHoldingRow::new(
+                        wallet_address.clone(),
+                        transfer.mint_address.clone(),
+                        transfer.timestamp,
+                    )
+                });
+
+                holding.updated_at = event_ts;
+
+                if is_source {
+                    holding.current_balance = transfer.source_balance;
+                    holding.history_transfer_out += 1;
+                } else {
+                    holding.current_balance = transfer.destination_balance;
+                    holding.history_transfer_in += 1;
+                }
+            };
 
         process_wallet(&transfer.source, true, profiles);
         process_holding(&transfer.source, true, holdings);
@@ -676,17 +867,31 @@ impl WalletAggregator {
             process_holding(&transfer.destination, false, holdings);
         }
     }
-    fn convert_to_sol(&self, amount: f64, quote_address: &str, total_usd: f64, native_price: f64) -> f64 {
+    fn convert_to_sol(
+        &self,
+        amount: f64,
+        quote_address: &str,
+        total_usd: f64,
+        native_price: f64,
+    ) -> f64 {
         if quote_address == NATIVE_MINT {
             amount
-        } else if (quote_address == USDC_MINT || quote_address == USDT_MINT || quote_address == USD1_MINT) && native_price > 0.0 {
+        } else if (quote_address == USDC_MINT
+            || quote_address == USDT_MINT
+            || quote_address == USD1_MINT)
+            && native_price > 0.0
+        {
             total_usd / native_price
         } else {
-            0.0 
+            0.0
         }
     }
 
-    async fn finalize_and_persist(&self, profiles: ProfileCache, holdings: HoldingsCache) -> Result<()> {
+    async fn finalize_and_persist(
+        &self,
+        profiles: ProfileCache,
+        holdings: HoldingsCache,
+    ) -> Result<()> {
         let mut updated_profiles = Vec::new();
         let mut updated_metrics = Vec::new();
         for entry in profiles.into_values() {
@@ -695,16 +900,40 @@ impl WalletAggregator {
         }
         if !updated_profiles.is_empty() {
             println!("[db] 💾 Flushing {} profiles...", updated_profiles.len());
-            insert_rows(&self.db_client, "wallet_profiles", updated_profiles, "Wallet Aggregator", "profiles").await?;
+            insert_rows(
+                &self.db_client,
+                "wallet_profiles",
+                updated_profiles,
+                "Wallet Aggregator",
+                "profiles",
+            )
+            .await?;
         }
         if !updated_metrics.is_empty() {
-            println!("[db] 💾 Flushing {} profile metrics...", updated_metrics.len());
-            insert_rows(&self.db_client, "wallet_profile_metrics", updated_metrics, "Wallet Aggregator", "profile_metrics").await?;
+            println!(
+                "[db] 💾 Flushing {} profile metrics...",
+                updated_metrics.len()
+            );
+            insert_rows(
+                &self.db_client,
+                "wallet_profile_metrics",
+                updated_metrics,
+                "Wallet Aggregator",
+                "profile_metrics",
+            )
+            .await?;
         }
         let updated_holdings: Vec<WalletHoldingRow> = holdings.into_values().collect();
         if !updated_holdings.is_empty() {
             println!("[db] 💾 Flushing {} holdings...", updated_holdings.len());
-            insert_rows(&self.db_client, "wallet_holdings", updated_holdings, "Wallet Aggregator", "holdings").await?;
+            insert_rows(
+                &self.db_client,
+                "wallet_holdings",
+                updated_holdings,
+                "Wallet Aggregator",
+                "holdings",
+            )
+            .await?;
         }
         Ok(())
     }
@@ -749,24 +978,35 @@ impl WalletAggregator {
         let mut entries = HashMap::new();
         for (wallet, profile) in profiles {
             let metrics = metrics_map.remove(&wallet);
-            entries.insert(wallet.clone(), WalletProfileEntry::from_parts(profile, metrics));
+            entries.insert(
+                wallet.clone(),
+                WalletProfileEntry::from_parts(profile, metrics),
+            );
         }
         Ok(entries)
     }
 
     async fn fetch_holdings(&self, keys: &[(String, String)]) -> Result<HoldingsCache> {
-        if keys.is_empty() { return Ok(HashMap::new()); }
-        let mut cursor = self.db_client
-            .query("
+        if keys.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let mut cursor = self
+            .db_client
+            .query(
+                "
                 SELECT * FROM wallet_holdings
                 WHERE (wallet_address, mint_address) IN ?
                 ORDER BY updated_at DESC
-            ")
+            ",
+            )
             .bind(keys)
             .fetch::<WalletHoldingRow>()?;
         let mut holdings = HashMap::new();
         while let Some(holding) = cursor.next().await? {
-            holdings.insert((holding.wallet_address.clone(), holding.mint_address.clone()), holding);
+            holdings.insert(
+                (holding.wallet_address.clone(), holding.mint_address.clone()),
+                holding,
+            );
         }
         Ok(holdings)
     }
@@ -818,7 +1058,9 @@ impl WalletProfileEntry {
     fn from_parts(profile: WalletProfileRow, metrics: Option<WalletProfileMetricsRow>) -> Self {
         let wallet_address = profile.wallet_address.clone();
         Self {
-            metrics: metrics.unwrap_or_else(|| WalletProfileMetricsRow::new(wallet_address.clone(), profile.updated_at)),
+            metrics: metrics.unwrap_or_else(|| {
+                WalletProfileMetricsRow::new(wallet_address.clone(), profile.updated_at)
+            }),
             profile,
         }
     }

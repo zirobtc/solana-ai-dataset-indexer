@@ -1,5 +1,4 @@
-
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use chrono::prelude::*;
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -35,7 +34,8 @@ impl PriceService {
     /// Creates a new PriceService instance.
     /// All network-intensive operations are performed here, ONCE at startup.
     pub async fn new() -> Result<Self> {
-        let backfill_mode = env::var("BACKFILL_MODE").unwrap_or_else(|_| "false".to_string()) == "true";
+        let backfill_mode =
+            env::var("BACKFILL_MODE").unwrap_or_else(|_| "false".to_string()) == "true";
 
         let (initial_price, historical_prices) = if backfill_mode {
             println!("[PriceService] Backfill mode enabled. Fetching historical prices...");
@@ -47,7 +47,7 @@ impl PriceService {
             let live_price = fetch_live_native_price().await?;
             (live_price, BTreeMap::new())
         };
-        
+
         println!("[PriceService] Initialized with price: ${}", initial_price);
 
         Ok(Self {
@@ -75,7 +75,6 @@ impl PriceService {
     }
 }
 
-
 /// The background task that ONLY runs in live mode to update the price.
 /// It now returns a Result to satisfy the JoinHandle's expected type.
 pub async fn price_updater_task(price_service: PriceService) -> Result<()> {
@@ -99,7 +98,7 @@ pub async fn price_updater_task(price_service: PriceService) -> Result<()> {
             }
         }
     }
-    
+
     // This code is unreachable but satisfies the function's return type.
     #[allow(unreachable_code)]
     Ok(())
@@ -116,16 +115,20 @@ async fn fetch_live_native_price() -> Result<f64> {
 
 /// Fetches historical SOL prices from CoinGecko for the configured date range.
 async fn fetch_historical_prices() -> Result<BTreeMap<u32, f64>> {
-    let start_date_str = env::var("BACKFILL_START_DATE")
-        .map_err(|_| anyhow!("BACKFILL_START_DATE must be set in .env for backfill mode (YYYY-MM-DD)"))?;
-    let end_date_str = env::var("BACKFILL_END_DATE")
-        .map_err(|_| anyhow!("BACKFILL_END_DATE must be set in .env for backfill mode (YYYY-MM-DD)"))?;
+    let start_date_str = env::var("BACKFILL_START_DATE").map_err(|_| {
+        anyhow!("BACKFILL_START_DATE must be set in .env for backfill mode (YYYY-MM-DD)")
+    })?;
+    let end_date_str = env::var("BACKFILL_END_DATE").map_err(|_| {
+        anyhow!("BACKFILL_END_DATE must be set in .env for backfill mode (YYYY-MM-DD)")
+    })?;
 
     let start_ts = NaiveDate::parse_from_str(&start_date_str, "%Y-%m-%d")?
-        .and_hms_opt(0, 0, 0).unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
         .timestamp();
     let end_ts = NaiveDate::parse_from_str(&end_date_str, "%Y-%m-%d")?
-        .and_hms_opt(23, 59, 59).unwrap()
+        .and_hms_opt(23, 59, 59)
+        .unwrap()
         .timestamp();
 
     let url = format!(
@@ -133,7 +136,10 @@ async fn fetch_historical_prices() -> Result<BTreeMap<u32, f64>> {
         start_ts, end_ts
     );
 
-    let response = reqwest::get(&url).await?.json::<HistoricalPriceResponse>().await?;
+    let response = reqwest::get(&url)
+        .await?
+        .json::<HistoricalPriceResponse>()
+        .await?;
 
     let mut price_map = BTreeMap::new();
     for price_point in response.prices {
@@ -141,6 +147,9 @@ async fn fetch_historical_prices() -> Result<BTreeMap<u32, f64>> {
         price_map.insert(timestamp_sec, price_point[1]);
     }
 
-    println!("[PriceService] ✅ Fetched and cached {} historical price points.", price_map.len());
+    println!(
+        "[PriceService] ✅ Fetched and cached {} historical price points.",
+        price_map.len()
+    );
     Ok(price_map)
 }

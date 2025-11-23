@@ -1,11 +1,13 @@
-use std::{borrow::Cow, collections::HashMap, time::{SystemTime, UNIX_EPOCH}};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use clickhouse::Row;
 use serde::{Deserialize, Serialize};
-use solana_sdk::{ pubkey::Pubkey};
+use solana_sdk::pubkey::Pubkey;
 use yellowstone_grpc_proto::prelude::InnerInstruction;
-
-
 
 pub type BalanceMap = HashMap<String, u64>; // Wallet Address -> Lamport Balance
 pub type TokenBalanceMap = HashMap<String, BalanceMap>; // Mint Address -> BalanceMap
@@ -13,10 +15,9 @@ pub type TokenBalanceMap = HashMap<String, BalanceMap>; // Mint Address -> Balan
 #[derive(Debug, Clone)]
 pub struct FormattedInstruction<'a> {
     pub instruction: Cow<'a, solana_sdk::instruction::CompiledInstruction>,
-    pub inner_instructions: Vec<Cow<'a, InnerInstruction>>, 
+    pub inner_instructions: Vec<Cow<'a, InnerInstruction>>,
     pub logs: Vec<Cow<'a, str>>,
 }
-
 
 /// The simple, universal transaction structure based on your example.
 #[derive(Debug, Clone)]
@@ -27,17 +28,15 @@ pub struct UnifiedTransaction<'a> {
     pub block_time: u32,
     pub signers: Vec<String>,
     pub error: Option<String>,
-    
+
     pub account_keys: Vec<Pubkey>,
     pub formatted_instructions: Vec<FormattedInstruction<'a>>,
     pub logs: Vec<String>,
 
     pub pre_balances: TokenBalanceMap,
     pub post_balances: TokenBalanceMap,
-    pub token_decimals: HashMap<String, u8>, 
+    pub token_decimals: HashMap<String, u8>,
 }
-
-
 
 #[derive(Row, Serialize, Deserialize, Debug, Clone)]
 pub struct TradeRow {
@@ -70,7 +69,7 @@ pub struct TradeRow {
     pub quote_address: String,
 
     pub slippage: f32,
-    
+
     pub price_impact: f32,
 
     pub base_amount: u64,
@@ -86,7 +85,6 @@ pub struct TradeRow {
 #[derive(Row, Serialize, Deserialize, Debug, Clone)]
 pub struct MintRow {
     // === Transaction Details ===
-
     pub signature: String,
     pub timestamp: u32,
     pub slot: u64,
@@ -124,7 +122,6 @@ pub struct MintRow {
 #[derive(Row, Serialize, Deserialize, Debug, Clone)]
 pub struct MigrationRow {
     // === Transaction Details ===
-
     pub timestamp: u32,
     pub signature: String,
     pub slot: u64,
@@ -152,7 +149,6 @@ pub struct MigrationRow {
 #[derive(Row, Serialize, Deserialize, Debug, Clone)]
 pub struct FeeCollectionRow {
     // === Transaction Details ===
-
     pub timestamp: u32,
     pub signature: String,
     pub slot: u64,
@@ -186,7 +182,6 @@ pub struct FeeCollectionRow {
 #[derive(Row, Serialize, Deserialize, Debug, Clone)]
 pub struct LiquidityRow {
     // === Transaction Details ===
-
     pub signature: String,
     pub timestamp: u32,
     pub slot: u64,
@@ -213,7 +208,6 @@ pub struct LiquidityRow {
 #[derive(Row, Serialize, Deserialize, Debug, Clone)]
 pub struct PoolCreationRow {
     // === Transaction Details ===
-
     pub signature: String,
     pub timestamp: u32,
     pub slot: u64,
@@ -241,7 +235,6 @@ pub struct PoolCreationRow {
 #[derive(Row, Serialize, Deserialize, Debug, Clone)]
 pub struct TransferRow {
     // === Transaction Details ===
-
     pub timestamp: u32,
     pub signature: String,
     pub slot: u64,
@@ -265,14 +258,13 @@ pub struct TransferRow {
 
     // Balance Context ===
     pub source_balance: f64,
-    
-    pub destination_balance: f64
+
+    pub destination_balance: f64,
 }
 
 #[derive(Row, Serialize, Deserialize, Debug, Clone)]
 pub struct SupplyLockRow {
     // === Transaction Details ===
-
     pub timestamp: u32,
     pub signature: String,
     pub slot: u64,
@@ -295,7 +287,6 @@ pub struct SupplyLockRow {
 #[derive(Row, Serialize, Deserialize, Debug, Clone)]
 pub struct SupplyLockActionRow {
     // === Transaction Details ===
-
     pub signature: String,
     pub timestamp: u32,
     pub slot: u64,
@@ -322,7 +313,6 @@ pub struct SupplyLockActionRow {
 #[derive(Row, Serialize, Deserialize, Debug, Clone)]
 pub struct BurnRow {
     // === Transaction Details ===
-
     pub timestamp: u32,
     pub signature: String,
     pub slot: u64,
@@ -346,10 +336,10 @@ pub struct BurnRow {
 #[derive(Row, Serialize, Deserialize, Debug, Clone)]
 pub struct WalletProfileRow {
     pub updated_at: u32,
-    pub first_seen_ts: u32,      
-    pub last_seen_ts: u32,   
-    
-    pub wallet_address: String,  
+    pub first_seen_ts: u32,
+    pub last_seen_ts: u32,
+
+    pub wallet_address: String,
     pub tags: Vec<String>,
     pub deployed_tokens: Vec<String>,
     pub funded_from: String,
@@ -374,7 +364,7 @@ pub struct WalletProfileMetricsRow {
     pub total_winrate: f32,
 
     pub stats_1d_realized_profit_sol: f64,
-    pub stats_1d_realized_profit_usd: f64, 
+    pub stats_1d_realized_profit_usd: f64,
     pub stats_1d_realized_profit_pnl: f32,
     pub stats_1d_buy_count: u32,
     pub stats_1d_sell_count: u32,
@@ -390,7 +380,7 @@ pub struct WalletProfileMetricsRow {
     pub stats_1d_tokens_traded: u32,
 
     pub stats_7d_realized_profit_sol: f64,
-    pub stats_7d_realized_profit_usd: f64, 
+    pub stats_7d_realized_profit_usd: f64,
     pub stats_7d_realized_profit_pnl: f32,
     pub stats_7d_buy_count: u32,
     pub stats_7d_sell_count: u32,
@@ -400,13 +390,13 @@ pub struct WalletProfileMetricsRow {
     pub stats_7d_total_bought_cost_sol: f64,
     pub stats_7d_total_bought_cost_usd: f64,
     pub stats_7d_total_sold_income_sol: f64,
-    pub stats_7d_total_sold_income_usd: f64, 
+    pub stats_7d_total_sold_income_usd: f64,
     pub stats_7d_total_fee: f64,
     pub stats_7d_winrate: f32,
     pub stats_7d_tokens_traded: u32,
 
     pub stats_30d_realized_profit_sol: f64,
-    pub stats_30d_realized_profit_usd: f64, 
+    pub stats_30d_realized_profit_usd: f64,
     pub stats_30d_realized_profit_pnl: f32,
     pub stats_30d_buy_count: u32,
     pub stats_30d_sell_count: u32,
@@ -414,9 +404,9 @@ pub struct WalletProfileMetricsRow {
     pub stats_30d_transfer_out_count: u32,
     pub stats_30d_avg_holding_period: f32,
     pub stats_30d_total_bought_cost_sol: f64,
-    pub stats_30d_total_bought_cost_usd: f64, 
+    pub stats_30d_total_bought_cost_usd: f64,
     pub stats_30d_total_sold_income_sol: f64,
-    pub stats_30d_total_sold_income_usd: f64, 
+    pub stats_30d_total_sold_income_usd: f64,
     pub stats_30d_total_fee: f64,
     pub stats_30d_winrate: f32,
     pub stats_30d_tokens_traded: u32,
@@ -443,12 +433,11 @@ pub struct WalletHoldingRow {
     pub history_sold_income_sol: f64,
 }
 
-
 #[derive(Row, Serialize, Deserialize, Debug, Clone)]
 pub struct TokenStaticRow {
     pub updated_at: u32,
     pub created_at: u32,
-    
+
     pub token_address: String,
 
     pub name: String,
@@ -458,7 +447,7 @@ pub struct TokenStaticRow {
     pub decimals: u8,
     pub creator_address: String,
     pub pool_addresses: Vec<String>,
-        
+
     pub launchpad: u8,
     pub protocol: u8,
     pub total_supply: u64,
@@ -616,7 +605,11 @@ impl TokenStaticRow {
             token_uri: mint.token_uri.clone().unwrap_or_default(),
             decimals: mint.token_decimals,
             creator_address: mint.creator_address.clone(),
-            pool_addresses: if mint.pool_address.is_empty() { vec![] } else { vec![mint.pool_address.clone()] },
+            pool_addresses: if mint.pool_address.is_empty() {
+                vec![]
+            } else {
+                vec![mint.pool_address.clone()]
+            },
             launchpad: mint.protocol,
             protocol: mint.protocol,
             total_supply: mint.initial_base_liquidity,
@@ -626,12 +619,22 @@ impl TokenStaticRow {
             freeze_authority: mint.freeze_authority.clone(),
         }
     }
-    
+
     pub fn new(
-        mint_address: String, timestamp: u32, name: String, symbol: String, uri: String, 
-        decimals: u8, creator_address: String, pool_addresses: Vec<String>,  protocol: u8, 
-        total_supply: u64, is_mutable: bool, update_authority: Option<String>, 
-        mint_authority: Option<String>, freeze_authority: Option<String>
+        mint_address: String,
+        timestamp: u32,
+        name: String,
+        symbol: String,
+        uri: String,
+        decimals: u8,
+        creator_address: String,
+        pool_addresses: Vec<String>,
+        protocol: u8,
+        total_supply: u64,
+        is_mutable: bool,
+        update_authority: Option<String>,
+        mint_authority: Option<String>,
+        freeze_authority: Option<String>,
     ) -> Self {
         Self {
             updated_at: timestamp,

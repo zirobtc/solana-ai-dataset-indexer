@@ -1,11 +1,14 @@
 #![allow(warnings)]
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use backoff::{ExponentialBackoff, future::retry};
 use clickhouse::Client;
 use dotenvy::dotenv;
 use futures_util::StreamExt;
-use redis::{streams::{StreamReadOptions, StreamReadReply}, Client as RedisClient};
+use redis::{
+    Client as RedisClient,
+    streams::{StreamReadOptions, StreamReadReply},
+};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{
     hash::Hash,
@@ -17,6 +20,10 @@ use solana_sdk::{
 };
 use yellowstone_grpc_proto::{prelude::SubscribeUpdateTransaction, solana};
 
+use neo4rs::Graph;
+use once_cell::sync::Lazy;
+use redis::FromRedisValue;
+use redis::{AsyncCommands, streams::StreamMaxlen};
 use std::{
     collections::HashMap,
     env,
@@ -24,35 +31,39 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     vec,
 };
+use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tokio::{
     sync::mpsc,
     task::JoinHandle,
-    time::{interval, sleep, timeout, MissedTickBehavior},
+    time::{MissedTickBehavior, interval, sleep, timeout},
 };
-use once_cell::sync::Lazy;
 use tonic::transport::ClientTlsConfig;
 use yellowstone_grpc_client::GeyserGrpcClient;
 use yellowstone_grpc_proto::prelude::{
     CommitmentLevel, SubscribeRequest, SubscribeRequestFilterTransactions, TransactionStatusMeta,
     subscribe_update::UpdateOneof,
 };
-use redis::{streams::StreamMaxlen, AsyncCommands};
-use redis::FromRedisValue;
-use tokio::sync::Mutex;
-use tokio::sync::RwLock;
-use neo4rs::Graph;
 
 // --- MODULES ---
 mod aggregator;
 mod database;
 mod handlers;
-mod simulator;
 mod services;
+mod simulator;
 mod spl_system_decoder;
 mod types;
 mod utils;
-use crate::{aggregator::{link_graph::LinkGraph, token_stats::TokenAggregator}, services::{solana_subscribers::{car_file_subscriber, geyser_subscriber, websocket_subscriber}}, types::{BurnRow, EventPayload, EventType, FeeCollectionRow, LiquidityRow, MigrationRow, MintRow, PoolCreationRow, SupplyLockActionRow, SupplyLockRow, TransferRow, UnifiedTransaction, TradeRow}};
-use crate::services::price_service::{price_updater_task, PriceService}; 
+use crate::services::price_service::{PriceService, price_updater_task};
+use crate::{
+    aggregator::{link_graph::LinkGraph, token_stats::TokenAggregator},
+    services::solana_subscribers::{car_file_subscriber, geyser_subscriber, websocket_subscriber},
+    types::{
+        BurnRow, EventPayload, EventType, FeeCollectionRow, LiquidityRow, MigrationRow, MintRow,
+        PoolCreationRow, SupplyLockActionRow, SupplyLockRow, TradeRow, TransferRow,
+        UnifiedTransaction,
+    },
+};
 
 fn channel_capacity_from_env(var: &str, default: usize) -> usize {
     env::var(var)
@@ -64,26 +75,31 @@ fn channel_capacity_from_env(var: &str, default: usize) -> usize {
 
 // --- Use the new handlers and the trait ---
 use handlers::{
-    TransactionHandler, TransactionInfo,
-    pump_fun_amm_handler::PumpFunAmmHandler, 
+    TransactionHandler,
+    TransactionInfo,
+    pump_fun_amm_handler::PumpFunAmmHandler,
     pump_fun_launchpad_handler::PumpFunLaunchpadHandler,
+    spl_token_handler::SplTokenHandler,
+    streamflow_handler::StreamflowHandler,
     // raydium_cpmm_handler::RaydiumCpmmHandler, raydium_launchpad_handler::RaydiumLaunchpadHandler,
-    system_handler::SystemHandler, spl_token_handler::SplTokenHandler, streamflow_handler::StreamflowHandler,
+    system_handler::SystemHandler,
 };
 
 use crate::database::insert_rows;
 
-
-
 async fn transaction_processor(
     rx_receiver: Arc<Mutex<mpsc::Receiver<UnifiedTransaction<'static>>>>,
-    protocol_handlers: Vec<Box<dyn TransactionHandler>>, 
+    protocol_handlers: Vec<Box<dyn TransactionHandler>>,
     solana_handlers: Vec<Box<dyn TransactionHandler>>,
     price_service: PriceService,
     event_payload_sender: mpsc::Sender<EventPayload>,
     worker_id: usize,
 ) -> Result<()> {
-    println!(" Transaction processor worker {} started with {} protocol handlers.", worker_id, protocol_handlers.len());
+    println!(
+        " Transaction processor worker {} started with {} protocol handlers.",
+        worker_id,
+        protocol_handlers.len()
+    );
 
     // --- Metrics Tracking ---
     let mut last_log_time = Instant::now();
@@ -181,7 +197,11 @@ async fn transaction_processor(
     Ok(())
 }
 
-async fn database_writer_service(db_client: Client, redis_client: RedisClient, read_count: usize) -> Result<()> {
+async fn database_writer_service(
+    db_client: Client,
+    redis_client: RedisClient,
+    read_count: usize,
+) -> Result<()> {
     println!("[DB Writer] Service started.");
     let mut conn = redis_client.get_multiplexed_async_connection().await?;
     let stream_key = "event_queue";
@@ -200,18 +220,30 @@ async fn database_writer_service(db_client: Client, redis_client: RedisClient, r
         if !e.to_string().contains("BUSYGROUP") {
             return Err(anyhow!("Failed to create DB writer consumer group: {}", e));
         }
-        println!("[DB Writer] Consumer group '{}' already exists. Resuming.", group_name);
+        println!(
+            "[DB Writer] Consumer group '{}' already exists. Resuming.",
+            group_name
+        );
     } else {
-        println!("[DB Writer] Created new consumer group '{}' on stream '{}'.", group_name, stream_key);
+        println!(
+            "[DB Writer] Created new consumer group '{}' on stream '{}'.",
+            group_name, stream_key
+        );
     }
 
-    let opts = StreamReadOptions::default().group(group_name, &consumer_name).count(read_count).block(5000);
+    let opts = StreamReadOptions::default()
+        .group(group_name, &consumer_name)
+        .count(read_count)
+        .block(5000);
 
     loop {
         let reply: StreamReadReply = match conn.xread_options(&[stream_key], &[">"], &opts).await {
             Ok(reply) => reply,
             Err(e) => {
-                eprintln!("[DB Writer] 🔴 Error reading from Redis Stream: {}. Retrying...", e);
+                eprintln!(
+                    "[DB Writer] 🔴 Error reading from Redis Stream: {}. Retrying...",
+                    e
+                );
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 continue;
             }
@@ -267,7 +299,9 @@ async fn database_writer_service(db_client: Client, redis_client: RedisClient, r
             all_inserts_ok = false;
             eprintln!("[DB Writer] 🔴 FAILED to insert trades: {}", e);
         }
-        if let Err(e) = insert_rows(&db_client, "transfers", transfers, "DB Writer", "transfer").await {
+        if let Err(e) =
+            insert_rows(&db_client, "transfers", transfers, "DB Writer", "transfer").await
+        {
             all_inserts_ok = false;
             eprintln!("[DB Writer] 🔴 FAILED to insert transfers: {}", e);
         }
@@ -279,27 +313,69 @@ async fn database_writer_service(db_client: Client, redis_client: RedisClient, r
             all_inserts_ok = false;
             eprintln!("[DB Writer] 🔴 FAILED to insert burns: {}", e);
         }
-        if let Err(e) = insert_rows(&db_client, "pool_creations", pools, "DB Writer", "pool_creation").await {
+        if let Err(e) = insert_rows(
+            &db_client,
+            "pool_creations",
+            pools,
+            "DB Writer",
+            "pool_creation",
+        )
+        .await
+        {
             all_inserts_ok = false;
             eprintln!("[DB Writer] 🔴 FAILED to insert pool_creations: {}", e);
         }
-        if let Err(e) = insert_rows(&db_client, "liquidity", liquidity, "DB Writer", "liquidity").await {
+        if let Err(e) =
+            insert_rows(&db_client, "liquidity", liquidity, "DB Writer", "liquidity").await
+        {
             all_inserts_ok = false;
             eprintln!("[DB Writer] 🔴 FAILED to insert liquidity: {}", e);
         }
-        if let Err(e) = insert_rows(&db_client, "migrations", migrations, "DB Writer", "migration").await {
+        if let Err(e) = insert_rows(
+            &db_client,
+            "migrations",
+            migrations,
+            "DB Writer",
+            "migration",
+        )
+        .await
+        {
             all_inserts_ok = false;
             eprintln!("[DB Writer] 🔴 FAILED to insert migrations: {}", e);
         }
-        if let Err(e) = insert_rows(&db_client, "fee_collections", fee_collections, "DB Writer", "fee_collection").await {
+        if let Err(e) = insert_rows(
+            &db_client,
+            "fee_collections",
+            fee_collections,
+            "DB Writer",
+            "fee_collection",
+        )
+        .await
+        {
             all_inserts_ok = false;
             eprintln!("[DB Writer] 🔴 FAILED to insert fee collections: {}", e);
         }
-        if let Err(e) = insert_rows(&db_client, "supply_locks", supply_locks, "DB Writer", "supply_lock").await {
+        if let Err(e) = insert_rows(
+            &db_client,
+            "supply_locks",
+            supply_locks,
+            "DB Writer",
+            "supply_lock",
+        )
+        .await
+        {
             all_inserts_ok = false;
             eprintln!("[DB Writer] 🔴 FAILED to insert supply locks: {}", e);
         }
-        if let Err(e) = insert_rows(&db_client, "supply_lock_actions", supply_lock_actions, "DB Writer", "supply_lock_action").await {
+        if let Err(e) = insert_rows(
+            &db_client,
+            "supply_lock_actions",
+            supply_lock_actions,
+            "DB Writer",
+            "supply_lock_action",
+        )
+        .await
+        {
             all_inserts_ok = false;
             eprintln!("[DB Writer] 🔴 FAILED to insert supply lock actions: {}", e);
         }
@@ -308,26 +384,39 @@ async fn database_writer_service(db_client: Client, redis_client: RedisClient, r
             let mut dlq_failed = false;
             for payload in payloads_for_retry {
                 let payload_entry = [("payload", payload)];
-                if let Err(e) = conn.xadd::<_, _, _, _, ()>(&*DB_WRITER_DLQ_STREAM, "*", &payload_entry).await {
+                if let Err(e) = conn
+                    .xadd::<_, _, _, _, ()>(&*DB_WRITER_DLQ_STREAM, "*", &payload_entry)
+                    .await
+                {
                     dlq_failed = true;
-                    eprintln!("[DB Writer] 🔴 FAILED to write payload to DLQ after insert error: {}", e);
+                    eprintln!(
+                        "[DB Writer] 🔴 FAILED to write payload to DLQ after insert error: {}",
+                        e
+                    );
                     break;
                 }
             }
             if dlq_failed {
-                eprintln!("[DB Writer] ⚠️ Leaving messages pending because DLQ write failed. Manual intervention required.");
+                eprintln!(
+                    "[DB Writer] ⚠️ Leaving messages pending because DLQ write failed. Manual intervention required."
+                );
                 continue;
             }
         }
 
         // Only acknowledge once data is safely persisted or requeued.
         if !message_ids_to_ack.is_empty() {
-            let result: redis::RedisResult<()> = conn
-                .xack(stream_key, group_name, &message_ids_to_ack)
-                .await;
+            let result: redis::RedisResult<()> =
+                conn.xack(stream_key, group_name, &message_ids_to_ack).await;
             if let Err(e) = result {
-                eprintln!("[DB Writer] 🔴 FAILED to acknowledge messages in Redis: {}", e);
-            } else if let Err(e) = conn.xdel::<_, _, i64>(stream_key, &message_ids_to_ack).await {
+                eprintln!(
+                    "[DB Writer] 🔴 FAILED to acknowledge messages in Redis: {}",
+                    e
+                );
+            } else if let Err(e) = conn
+                .xdel::<_, _, i64>(stream_key, &message_ids_to_ack)
+                .await
+            {
                 eprintln!("[DB Writer] 🔴 FAILED to delete messages in Redis: {}", e);
             }
         }
@@ -367,13 +456,19 @@ async fn redis_publisher_service(
             if backfill_backlog_limit > 0 && stream_maxlen.is_none() {
                 match conn.xlen::<_, usize>(stream_key).await {
                     Ok(len) if len as usize >= backfill_backlog_limit => {
-                        eprintln!("[Redis Publisher] Backlog at {} (limit {}). Throttling producer...", len, backfill_backlog_limit);
+                        eprintln!(
+                            "[Redis Publisher] Backlog at {} (limit {}). Throttling producer...",
+                            len, backfill_backlog_limit
+                        );
                         sleep(Duration::from_millis(200)).await;
                         continue;
                     }
                     Ok(_) => {}
                     Err(e) => {
-                        eprintln!("[Redis Publisher] Failed to read backlog length: {}. Will retry.", e);
+                        eprintln!(
+                            "[Redis Publisher] Failed to read backlog length: {}. Will retry.",
+                            e
+                        );
                         sleep(Duration::from_millis(200)).await;
                         continue;
                     }
@@ -381,21 +476,20 @@ async fn redis_publisher_service(
             }
 
             let write_result = if let Some(maxlen) = &stream_maxlen {
-                conn.xadd_maxlen::<_, _, _, _, ()>(
-                    stream_key,
-                    maxlen.clone(),
-                    "*",
-                    &payload_entry,
-                )
-                .await
+                conn.xadd_maxlen::<_, _, _, _, ()>(stream_key, maxlen.clone(), "*", &payload_entry)
+                    .await
             } else {
-                conn.xadd::<_, _, _, _, ()>(stream_key, "*", &payload_entry).await
+                conn.xadd::<_, _, _, _, ()>(stream_key, "*", &payload_entry)
+                    .await
             };
 
             match write_result {
                 Ok(()) => break,
                 Err(e) => {
-                    eprintln!("[Redis Publisher] XADD failed (will retry, payload retained): {}", e);
+                    eprintln!(
+                        "[Redis Publisher] XADD failed (will retry, payload retained): {}",
+                        e
+                    );
                     // Attempt to reconnect before retrying the same payload.
                     loop {
                         match redis_client.get_multiplexed_async_connection().await {
@@ -404,7 +498,10 @@ async fn redis_publisher_service(
                                 break;
                             }
                             Err(err) => {
-                                eprintln!("[Redis Publisher] Reconnect attempt failed: {}. Retrying...", err);
+                                eprintln!(
+                                    "[Redis Publisher] Reconnect attempt failed: {}. Retrying...",
+                                    err
+                                );
                                 sleep(Duration::from_secs(1)).await;
                             }
                         }
@@ -421,11 +518,7 @@ async fn redis_queue_monitor(redis_client: RedisClient) -> Result<()> {
     let mut ticker = interval(Duration::from_secs(30));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-    let queues = vec![
-        "event_queue",
-        "wallet_agg_queue",
-        "link_graph_queue",
-    ];
+    let queues = vec!["event_queue", "wallet_agg_queue", "link_graph_queue"];
 
     loop {
         ticker.tick().await;
@@ -442,16 +535,17 @@ async fn redis_queue_monitor(redis_client: RedisClient) -> Result<()> {
 
 async fn initialize_price_service() -> Result<(PriceService, JoinHandle<Result<()>>)> {
     println!("[Main] Initializing Price Service...");
-    
+
     // PriceService::new() will block here until the API call is complete.
-    let price_service = PriceService::new().await
+    let price_service = PriceService::new()
+        .await
         .expect("FATAL: Could not initialize Price Service.");
-        
+
     println!("[Main] ✅ Price Service is ready. Spawning updater task.");
-    
+
     // Spawn the background updater task.
     let price_thread = tokio::spawn(price_updater_task(price_service.clone()));
-    
+
     Ok((price_service, price_thread))
 }
 
@@ -462,7 +556,8 @@ async fn main() -> Result<()> {
     // --- Configuration ---
     let debug_mode = env::var("DEBUG").unwrap_or_else(|_| "false".to_string()) == "true";
     let backfill_mode = env::var("BACKFILL_MODE").unwrap_or_else(|_| "false".to_string()) == "true";
-    let simulator_mode = env::var("SIMULATOR_MODE").unwrap_or_else(|_| "false".to_string()) == "true";
+    let simulator_mode =
+        env::var("SIMULATOR_MODE").unwrap_or_else(|_| "false".to_string()) == "true";
     let geyser_endpoint = env::var("GEYSER_ENDPOINT").expect("GEYSER_ENDPOINT must be set");
     let geyser_api_key = env::var("GEYSER_API_KEY").expect("GEYSER_API_KEY must be set");
     let rpc_url = env::var("SOLANA_RPC_URL").expect("Solana rpc url not found");
@@ -472,9 +567,7 @@ async fn main() -> Result<()> {
 
     // --- Client Initialization ---
     let client_with_url = Client::default().with_url(&db_url);
-    let db_client = client_with_url
-        .with_user("default")
-        .with_password("");
+    let db_client = client_with_url.with_user("default").with_password("");
 
     db_client.query("SELECT 1").fetch_one::<u8>().await?;
     println!(" Connection to ClickHouse successful.");
@@ -493,7 +586,11 @@ async fn main() -> Result<()> {
     let tx_channel_capacity = channel_capacity_from_env("TX_CHANNEL_CAPACITY", 4096);
     let event_channel_capacity = channel_capacity_from_env("EVENT_CHANNEL_CAPACITY", 4096);
     // In backfill we disable Redis truncation to avoid losing older events.
-    let redis_stream_max_len = if backfill_mode { 0 } else { channel_capacity_from_env("REDIS_STREAM_MAX_LEN", 50_000) };
+    let redis_stream_max_len = if backfill_mode {
+        0
+    } else {
+        channel_capacity_from_env("REDIS_STREAM_MAX_LEN", 50_000)
+    };
     // When backfilling, enforce a bounded backlog by throttling publisher instead of truncating.
     let redis_backfill_backlog_limit = if backfill_mode {
         channel_capacity_from_env("REDIS_BACKFILL_BACKLOG_LIMIT", 5_000_000)
@@ -504,10 +601,8 @@ async fn main() -> Result<()> {
         "[Main] 🧮 Channel capacities -> tx: {}, events: {}. Redis stream max len: {}",
         tx_channel_capacity, event_channel_capacity, redis_stream_max_len
     );
-    let (tx_sender, tx_receiver) = mpsc::channel(tx_channel_capacity); 
+    let (tx_sender, tx_receiver) = mpsc::channel(tx_channel_capacity);
     let (event_sender, event_receiver) = mpsc::channel::<EventPayload>(event_channel_capacity);
-
-
 
     // --- Background Tasks ---
 
@@ -536,15 +631,22 @@ async fn main() -> Result<()> {
         let writer_redis_client = redis_client.clone();
         let read_count = db_writer_read_count;
         let handle = tokio::spawn(async move {
-            println!("[Main] 🚀 Database (Raw Events) writer service worker {} spawned with batch {}.", worker_id, read_count);
-            if let Err(e) = database_writer_service(writer_db_client, writer_redis_client, read_count).await {
-                eprintln!("[Main] ❌ Database writer worker {} failed: {}", worker_id, e);
+            println!(
+                "[Main] 🚀 Database (Raw Events) writer service worker {} spawned with batch {}.",
+                worker_id, read_count
+            );
+            if let Err(e) =
+                database_writer_service(writer_db_client, writer_redis_client, read_count).await
+            {
+                eprintln!(
+                    "[Main] ❌ Database writer worker {} failed: {}",
+                    worker_id, e
+                );
             }
             Result::<()>::Ok(())
         });
         tasks.push(handle);
     }
-
 
     let wallet_agg_workers = channel_capacity_from_env("WALLET_AGG_WORKERS", 1);
     for worker_id in 0..wallet_agg_workers {
@@ -556,15 +658,26 @@ async fn main() -> Result<()> {
                 aggregator_db_client,
                 aggregator_redis_client,
                 wallet_aggregator_price_service,
-            ).await {
+            )
+            .await
+            {
                 Ok(mut aggregator) => {
-                    println!("[Main] 🚀 Wallet stats aggregator worker {} spawned.", worker_id);
+                    println!(
+                        "[Main] 🚀 Wallet stats aggregator worker {} spawned.",
+                        worker_id
+                    );
                     if let Err(e) = aggregator.run().await {
-                        eprintln!("[Main] ❌ WalletAggregator worker {} failed: {}", worker_id, e);
+                        eprintln!(
+                            "[Main] ❌ WalletAggregator worker {} failed: {}",
+                            worker_id, e
+                        );
                     }
                 }
                 Err(e) => {
-                    eprintln!("[Main] ❌ Failed to create WalletAggregator worker {}: {}", worker_id, e);
+                    eprintln!(
+                        "[Main] ❌ Failed to create WalletAggregator worker {}: {}",
+                        worker_id, e
+                    );
                 }
             }
             Result::<()>::Ok(())
@@ -576,23 +689,34 @@ async fn main() -> Result<()> {
     for worker_id in 0..token_agg_workers {
         let token_agg_db_client = db_client.clone();
         let token_agg_redis_client = redis_client.clone();
-        let token_agg_rpc_client = Arc::clone(&rpc_client); 
+        let token_agg_rpc_client = Arc::clone(&rpc_client);
         let token_agg_price_service = price_service.clone();
         let handle = tokio::spawn(async move {
             match TokenAggregator::new(
-                token_agg_db_client, 
-                token_agg_redis_client, 
-                token_agg_rpc_client, 
-                token_agg_price_service
-            ).await {
+                token_agg_db_client,
+                token_agg_redis_client,
+                token_agg_rpc_client,
+                token_agg_price_service,
+            )
+            .await
+            {
                 Ok(mut token_aggregator) => {
-                    println!("[Main] 🚀 Token stats aggregator worker {} spawned.", worker_id);
+                    println!(
+                        "[Main] 🚀 Token stats aggregator worker {} spawned.",
+                        worker_id
+                    );
                     if let Err(e) = token_aggregator.run().await {
-                        eprintln!("[Main] ❌ TokenAggregator worker {} failed: {}", worker_id, e);
+                        eprintln!(
+                            "[Main] ❌ TokenAggregator worker {} failed: {}",
+                            worker_id, e
+                        );
                     }
                 }
                 Err(e) => {
-                    eprintln!("[Main] ❌ Failed to create TokenAggregator worker {}: {}", worker_id, e);
+                    eprintln!(
+                        "[Main] ❌ Failed to create TokenAggregator worker {}: {}",
+                        worker_id, e
+                    );
                 }
             }
             Result::<()>::Ok(())
@@ -600,14 +724,12 @@ async fn main() -> Result<()> {
         tasks.push(handle);
     }
 
-
-
     let programs_to_monitor = vec![
         "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P".to_string(), // Pump.fun Launchpad
         "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA".to_string(), // Pump.fun AMM
         "strmRqUCoQUgGUan5YhzUZa6KqdzwX5L6FpUxfmKg5m".to_string(), // Streamflow
         "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA".to_string(), // SPL Token Program
-        "11111111111111111111111111111111".to_string(),   
+        "11111111111111111111111111111111".to_string(),
     ];
 
     // Spawn transaction processor workers
@@ -653,9 +775,9 @@ async fn main() -> Result<()> {
         tasks.push(sim_handle);
     } else if backfill_mode {
         println!("[Main] 🚀 Mode: BACKFILL. Starting CAR file subscriber.");
-        let car_file_path = env::var("CAR_FILE_PATH")
-            .expect("CAR_FILE_PATH must be set in .env for backfill mode");
-        
+        let car_file_path =
+            env::var("CAR_FILE_PATH").expect("CAR_FILE_PATH must be set in .env for backfill mode");
+
         // --- THE ONLY CHANGE IS HERE ---
         // Pass the programs_to_monitor vector to the subscriber
         let subscriber_task = tokio::spawn(car_file_subscriber(
@@ -685,8 +807,6 @@ async fn main() -> Result<()> {
         tasks.push(subscriber_task);
     };
 
-
-
     // --- SPAWN THE WALLET GRAPH AGGREGATOR THREADS ---
     let link_graph_workers = channel_capacity_from_env("LINK_GRAPH_WORKERS", 1);
     for worker_id in 0..link_graph_workers {
@@ -694,19 +814,24 @@ async fn main() -> Result<()> {
         let graph_neo4j_client = Arc::clone(&neo4j_client);
         let graph_db_client = db_client.clone();
         let handle = tokio::spawn(async move {
-            match LinkGraph::new(
-                graph_db_client,
-                graph_neo4j_client,
-                graph_redis_client
-            ).await {
+            match LinkGraph::new(graph_db_client, graph_neo4j_client, graph_redis_client).await {
                 Ok(mut graph_aggregator) => {
-                    println!("[Main] 🚀 Wallet graph aggregator worker {} spawned.", worker_id);
+                    println!(
+                        "[Main] 🚀 Wallet graph aggregator worker {} spawned.",
+                        worker_id
+                    );
                     if let Err(e) = graph_aggregator.run().await {
-                        eprintln!("[Main] ❌ Wallet graph aggregator worker {} failed: {}", worker_id, e);
+                        eprintln!(
+                            "[Main] ❌ Wallet graph aggregator worker {} failed: {}",
+                            worker_id, e
+                        );
                     }
                 }
                 Err(e) => {
-                    eprintln!("[Main] ❌ Failed to create WalletGraph aggregator worker {}: {}", worker_id, e);
+                    eprintln!(
+                        "[Main] ❌ Failed to create WalletGraph aggregator worker {}: {}",
+                        worker_id, e
+                    );
                 }
             }
             Result::<()>::Ok(())
@@ -714,8 +839,6 @@ async fn main() -> Result<()> {
         tasks.push(handle);
     }
 
-
-    
     // Wait for the primary tasks to complete
     for handle in tasks {
         if let Err(e) = handle.await {

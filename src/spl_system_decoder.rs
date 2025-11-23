@@ -204,4 +204,3 @@ pub fn decode_instruction(
 
     Ok(None)
 }
-

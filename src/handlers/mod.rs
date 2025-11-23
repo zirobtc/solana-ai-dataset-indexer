@@ -20,10 +20,10 @@ pub mod pump_fun_launchpad_handler;
 pub mod pump_fun_launchpad_idl;
 // pub mod raydium_cpmm_handler;
 // pub mod raydium_launchpad_handler;
-pub mod system_handler;
 pub mod spl_token_handler;
 pub mod streamflow_handler;
 pub mod streamflow_idl;
+pub mod system_handler;
 
 // A struct to hold all the common data about a transaction
 // This avoids passing 10+ arguments to every function.
@@ -51,7 +51,7 @@ pub trait TransactionHandler: Send + Sync {
     fn name(&self) -> &'static str;
 
     // Check if the transaction is relevant to this handler
-        fn is_of_interest(&self, tx: &UnifiedTransaction) -> bool;
+    fn is_of_interest(&self, tx: &UnifiedTransaction) -> bool;
 
     // Process the transaction and store its data in the database
     async fn process_transaction(
@@ -133,7 +133,6 @@ pub mod constants {
     pub const PROTOCOL_PUMPFUN_AMM: u8 = 3;
     pub const PROTOCOL_RAYDIUM_CPMM: u8 = 4;
 
-
     pub const VESTING_ACTION_WITHDRAW: u8 = 1;
     pub const VESTING_ACTION_TOPUP: u8 = 0;
     pub const VESTING_ACTION_CANCEL: u8 = 2;
@@ -150,16 +149,16 @@ pub mod constants {
     pub const PLATFORM_AXIOM: u8 = 3;
     pub const AXIOM_FEE_ADDRESSES: [&str; 2] = [
         "4FobGn5ZWYquoJkxMzh2VUAWvV36xMgxQ3M7uG1pGGhd",
-        "DYVeNgXGLAhZdeLMMYnCw1nPnMxkBN7fJnNpHmizTrrF"
+        "DYVeNgXGLAhZdeLMMYnCw1nPnMxkBN7fJnNpHmizTrrF",
     ];
     pub const AXIOM_ROUTER_PROGRAM_ID: &str = "6HB1VBBS8LrdQiR9MZcXV5VdpKFb7vjTMZuQQEQEPioC";
 
     // Trojan
-    pub const PLATFORM_TROJAN: u8 = 4; 
+    pub const PLATFORM_TROJAN: u8 = 4;
     pub const TROJAN_ROUTER_PROGRAM_ID: &str = "troY36YiPGqMyAYCNbEqYCdN2tb91Zf7bHcQt7KUi61";
 
     // BULLX
-    pub const PLATFORM_BULLX: u8 = 5; 
+    pub const PLATFORM_BULLX: u8 = 5;
     pub const BULLX_ROUTER_PROGRAM_ID: &str = "3soiUx2xiUB4wvooFKsQC3UqDR9tDKBgqEBPtpdT93Gu";
     pub const BULLX_FEE_ADDRESSES: [&str; 1] = [
         "9RYJ3qr5eU5xAooqVcbmdeusjcViL5Nkiq7Gske3tiKq",
@@ -168,5 +167,4 @@ pub mod constants {
 
     // Locking Protocols
     pub const PROTOCOL_STREAMFLOW: u8 = 1;
-
 }

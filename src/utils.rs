@@ -7,16 +7,16 @@ use solana_sdk::{
 };
 
 use spl_associated_token_account::get_associated_token_address;
-use yellowstone_grpc_proto::prelude::{Transaction, InnerInstruction, TransactionStatusMeta};
+use yellowstone_grpc_proto::prelude::{InnerInstruction, Transaction, TransactionStatusMeta};
 
-use std::borrow::Cow;
-use std::collections::HashMap;
-use std::str::FromStr;
 use crate::handlers::pump_fun_amm_handler::DecodedAction;
-use crate::handlers::{constants, TransactionInfo};
+use crate::handlers::{TransactionInfo, constants};
 use crate::types::{FormattedInstruction, UnifiedTransaction};
 use borsh::BorshDeserialize;
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::io;
+use std::str::FromStr;
 
 pub const TIP_ACCOUNTS: [&str; 11] = [
     "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5", // Jito Tip Account
@@ -28,11 +28,12 @@ pub const TIP_ACCOUNTS: [&str; 11] = [
     "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL", // Jito Tip Account
     "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT", // Jito Tip Account
     "4iUgjMT8q2hNZnLuhpqZ1QtiV8deFPy2ajvvjEpKKgsS", // 0slot_dot_trade_tip23.sol (Axiom)
-    "axmWxBPqgRmcBN2cV12quqaQzsk16SazVXq8397KFKu", // (Axiom)
-    "axmhpocX3hU7nT7KtsLBzNBR1Ur3HtU22Q5P313FREY", // (Axiom)
+    "axmWxBPqgRmcBN2cV12quqaQzsk16SazVXq8397KFKu",  // (Axiom)
+    "axmhpocX3hU7nT7KtsLBzNBR1Ur3HtU22Q5P313FREY",  // (Axiom)
 ];
 
-pub fn deserialize_lax<'a, T: BorshDeserialize>(data: &'a [u8]) -> Result<T, io::Error> { // <-- The only change is here
+pub fn deserialize_lax<'a, T: BorshDeserialize>(data: &'a [u8]) -> Result<T, io::Error> {
+    // <-- The only change is here
     let mut reader = data;
     T::deserialize_reader(&mut reader)
 }
@@ -75,9 +76,15 @@ pub fn format_transaction<'a>(
             .get(&(i as u8))
             .map_or(vec![], |ixs| ixs.iter().map(Cow::Borrowed).collect());
         // --- FIX ENDS HERE ---
-        
-        let log_start_index = top_level_invoke_indices.get(i).cloned().unwrap_or(log_messages.len());
-        let log_end_index = top_level_invoke_indices.get(i + 1).cloned().unwrap_or(log_messages.len());
+
+        let log_start_index = top_level_invoke_indices
+            .get(i)
+            .cloned()
+            .unwrap_or(log_messages.len());
+        let log_end_index = top_level_invoke_indices
+            .get(i + 1)
+            .cloned()
+            .unwrap_or(log_messages.len());
 
         let logs_for_ix: Vec<Cow<'a, str>> = log_messages
             .get(log_start_index..log_end_index)
@@ -96,13 +103,11 @@ pub fn format_transaction<'a>(
     formatted_instructions
 }
 
-
 pub fn get_asset_balances(
     tx: &UnifiedTransaction,
     owner_pubkey: &Pubkey,
     mint_pubkey_str: &str,
 ) -> (f64, f64) {
-
     // 2. Determine the correct account to check for the BASE token balance
     let wallet = if mint_pubkey_str == constants::NATIVE_MINT {
         // For SOL, the holder is the main wallet
@@ -166,10 +171,9 @@ pub fn build_full_account_keys(
     tx.message.static_account_keys().to_vec()
 }
 
-// --- JITO 
+// --- JITO
 pub fn get_tip(tx: &UnifiedTransaction) -> f64 {
     // A list of known public Jito and private platform tip accounts.
-
 
     for formatted_ix in &tx.formatted_instructions {
         let ix = &formatted_ix.instruction;
@@ -202,11 +206,13 @@ pub fn get_priority_fee(tx: &UnifiedTransaction) -> f64 {
                 match instruction_type {
                     // SetComputeUnitLimit instruction
                     2 if instruction_data.len() == 4 => {
-                        unit_limit = u32::from_le_bytes(instruction_data.try_into().unwrap()) as u64;
+                        unit_limit =
+                            u32::from_le_bytes(instruction_data.try_into().unwrap()) as u64;
                     }
                     // SetComputeUnitPrice instruction
                     3 if instruction_data.len() == 8 => {
-                        unit_price_micro_lamports = u64::from_le_bytes(instruction_data.try_into().unwrap());
+                        unit_price_micro_lamports =
+                            u64::from_le_bytes(instruction_data.try_into().unwrap());
                     }
                     _ => {}
                 }
@@ -219,14 +225,13 @@ pub fn get_priority_fee(tx: &UnifiedTransaction) -> f64 {
     if unit_price_micro_lamports > 0 && unit_limit > 0 {
         let prio_fee: f64 = (unit_price_micro_lamports * unit_limit) as f64 / 1_000_000.0;
 
-        (prio_fee / LAMPORTS_PER_SOL as f64) 
+        (prio_fee / LAMPORTS_PER_SOL as f64)
     } else {
         0.0
     }
 }
 
 pub fn get_mev_protection(tx: &UnifiedTransaction, tip: f64) -> u8 {
-
     // Level 2 Check: Look for a dedicated MEV protection account.
     for key in &tx.account_keys {
         if key.to_string().starts_with("jitodontfront") {
@@ -243,15 +248,19 @@ pub fn get_mev_protection(tx: &UnifiedTransaction, tip: f64) -> u8 {
     0
 }
 
-pub fn format_balance(raw_balance: f64, mint_address: &str, token_decimals: &HashMap<String, u8>) -> f64 {
+pub fn format_balance(
+    raw_balance: f64,
+    mint_address: &str,
+    token_decimals: &HashMap<String, u8>,
+) -> f64 {
     // Look up the decimals for the token mint.
     if let Some(&decimals) = token_decimals.get(mint_address) {
         // Convert the raw balance to a floating-point number.
         let raw_f64 = raw_balance as f64;
-        
+
         // Calculate the divisor: 10 raised to the power of the decimals.
         let divisor = 10u64.pow(decimals as u32) as f64;
-        
+
         // Return the formatted balance.
         raw_f64 / divisor
     } else {
@@ -267,7 +276,8 @@ pub fn find_account_pubkey_in_instruction(
     account_name: &str,
     instruction_accounts: &[u8],
     global_account_keys: &[Pubkey],
-) -> Option<Pubkey> { // Returns an Option, allowing us to check for failure
+) -> Option<Pubkey> {
+    // Returns an Option, allowing us to check for failure
     instruction_layouts
         .get(instruction_name)
         .and_then(|layout| layout.get(account_name))
@@ -286,19 +296,32 @@ pub fn get_trading_platform(tx: &UnifiedTransaction) -> u8 {
         // --- Strategy 1: Check top-level instruction for a known Router Program ID ---
         let top_level_ix = &formatted_ix.instruction;
         let top_level_program_id = &tx.account_keys[top_level_ix.program_id_index as usize];
-        
-        if top_level_program_id == &axiom_router_id { return constants::PLATFORM_AXIOM; }
-        if top_level_program_id == &bullx_router_id { return constants::PLATFORM_BULLX; }
-        if top_level_program_id == &trojan_router_id { return constants::PLATFORM_TROJAN; }
+
+        if top_level_program_id == &axiom_router_id {
+            return constants::PLATFORM_AXIOM;
+        }
+        if top_level_program_id == &bullx_router_id {
+            return constants::PLATFORM_BULLX;
+        }
+        if top_level_program_id == &trojan_router_id {
+            return constants::PLATFORM_TROJAN;
+        }
 
         // --- Strategy 2: Check top-level instruction for a direct fee transfer ---
         if top_level_program_id == &solana_sdk::system_program::id() {
-            if let Ok(SystemInstruction::Transfer { .. }) = bincode::deserialize(&top_level_ix.data) {
+            if let Ok(SystemInstruction::Transfer { .. }) = bincode::deserialize(&top_level_ix.data)
+            {
                 if let Some(dest_idx) = top_level_ix.accounts.get(1) {
                     let destination_account = tx.account_keys[*dest_idx as usize].to_string();
-                    if constants::AXIOM_FEE_ADDRESSES.contains(&destination_account.as_str()) { return constants::PLATFORM_AXIOM; }
-                    if destination_account.starts_with("axm") { return constants::PLATFORM_AXIOM; }
-                    if constants::BULLX_FEE_ADDRESSES.contains(&destination_account.as_str()) { return constants::PLATFORM_BULLX; }
+                    if constants::AXIOM_FEE_ADDRESSES.contains(&destination_account.as_str()) {
+                        return constants::PLATFORM_AXIOM;
+                    }
+                    if destination_account.starts_with("axm") {
+                        return constants::PLATFORM_AXIOM;
+                    }
+                    if constants::BULLX_FEE_ADDRESSES.contains(&destination_account.as_str()) {
+                        return constants::PLATFORM_BULLX;
+                    }
                 }
             }
         }
@@ -307,12 +330,19 @@ pub fn get_trading_platform(tx: &UnifiedTransaction) -> u8 {
         for inner_ix in &formatted_ix.inner_instructions {
             let inner_program_id = &tx.account_keys[inner_ix.program_id_index as usize];
             if inner_program_id == &solana_sdk::system_program::id() {
-                if let Ok(SystemInstruction::Transfer { .. }) = bincode::deserialize(&inner_ix.data) {
+                if let Ok(SystemInstruction::Transfer { .. }) = bincode::deserialize(&inner_ix.data)
+                {
                     if let Some(dest_idx) = inner_ix.accounts.get(1) {
                         let destination_account = tx.account_keys[*dest_idx as usize].to_string();
-                        if constants::AXIOM_FEE_ADDRESSES.contains(&destination_account.as_str()) { return constants::PLATFORM_AXIOM; }
-                        if destination_account.starts_with("axm") { return constants::PLATFORM_AXIOM; }
-                        if constants::BULLX_FEE_ADDRESSES.contains(&destination_account.as_str()) { return constants::PLATFORM_BULLX; }
+                        if constants::AXIOM_FEE_ADDRESSES.contains(&destination_account.as_str()) {
+                            return constants::PLATFORM_AXIOM;
+                        }
+                        if destination_account.starts_with("axm") {
+                            return constants::PLATFORM_AXIOM;
+                        }
+                        if constants::BULLX_FEE_ADDRESSES.contains(&destination_account.as_str()) {
+                            return constants::PLATFORM_BULLX;
+                        }
                     }
                 }
             }
@@ -344,24 +374,22 @@ pub fn calculate_amm_sell_metrics(
     base_amount_out_for_slippage: u64,
     // --- END: THE FIX ---
 ) -> (f64, f64) {
-
-
-
     if pre_trade_input_reserves == 0 || pre_trade_output_reserves == 0 {
         return (0.0, 0.0);
     }
 
     // Calculate EXPECTED and SPOT amounts for price impact (this logic is correct)
-    let expected_amount_out =
-        ((pre_trade_output_reserves as u128 * actual_amount_in as u128)
-            / (pre_trade_input_reserves + actual_amount_in) as u128) as u64;
+    let expected_amount_out = ((pre_trade_output_reserves as u128 * actual_amount_in as u128)
+        / (pre_trade_input_reserves + actual_amount_in) as u128)
+        as u64;
     let spot_amount_out = ((pre_trade_output_reserves as u128 * actual_amount_in as u128)
         / pre_trade_input_reserves as u128) as u64;
 
     // --- START: THE FIX ---
     // The slippage calculation now uses the explicitly provided baseline.
     let slippage_tolerance_pct = if base_amount_out_for_slippage > 0 {
-        (base_amount_out_for_slippage as f64 - min_amount_out as f64) / base_amount_out_for_slippage as f64
+        (base_amount_out_for_slippage as f64 - min_amount_out as f64)
+            / base_amount_out_for_slippage as f64
     } else {
         0.0
     };
@@ -389,9 +417,6 @@ pub fn calculate_amm_buy_metrics(
     base_amount_for_slippage: u64,
     // --- END: THE FIX ---
 ) -> (f64, f64) {
-
-
-
     if pre_trade_input_reserves == 0 || pre_trade_output_reserves < desired_amount_out {
         return (0.0, 0.0);
     }

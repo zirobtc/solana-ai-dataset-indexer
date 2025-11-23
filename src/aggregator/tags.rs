@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 pub enum WalletTag {
     // General Tags (0-19)
     FreshWallet = 0,
-    
+
     // Exchange Wallets (20-39)
     Binance = 20,
     Coinbase = 21,
@@ -64,98 +64,362 @@ impl TryFrom<u8> for WalletTag {
 
 pub const KNOWN_WALLETS: &[(&str, WalletTag)] = &[
     // Coinbase
-    ("3qP77PzrHxSrW1S8dH4Ss1dmpJDHpC6ATVgwy5FmXDEf", WalletTag::Coinbase),
-    ("9obNtb5GyUegcs3a1CbBkLuc5hEWynWfJC6gjz5uWQkE", WalletTag::Coinbase),
-    ("VTvk7sG6QQ28iK3NEKRRD9fvPzk5pKpJL2iwgVqMFcL", WalletTag::Coinbase),
-    ("4pHKEisSmAr5CSump4dJnTJgG6eugmtieXcUxDBcQcG5", WalletTag::Coinbase),
-    ("CKy3KzEMSL1PQV6Wppggoqi2nGA7teE4L7JipEK89yqj", WalletTag::Coinbase),
-    ("2AQdpHJ2JpcEgPiATUXjQxA8QmafFegfQwSLWSprPicm", WalletTag::Coinbase),
-    ("D89hHJT5Aqyx1trP6EnGY9jJUB3whgnq3aUvvCqedvzf", WalletTag::Coinbase),
-    ("AzAvbCQsXurd2PbGLYcB61tyvE8kLDaZShE1S5Bp3WeS", WalletTag::Coinbase),
-    ("6LzKPJ1Y6wdYTLfGDxe9WwoKpwAVMLHwXxmQpRgdD6ng", WalletTag::Coinbase),
-    ("59L2oxymiQQ9Hvhh92nt8Y7nDYjsauFkdb3SybdnsG6h", WalletTag::Coinbase),
-    ("3vxheE5C46XzK4XftziRhwAf8QAfipD7HXXWj25mgkom", WalletTag::Coinbase),
-    ("py5jDEUAynTufQHM7P6Tu9M8NUd8JYux7aMcLXcC51q", WalletTag::Coinbase),
-    ("F4C34HorTSr8C7Zmwj8Kdrbmq5XjV9d8iJywp74L8sZf", WalletTag::Coinbase),
-    ("146yGthSmnTPuCo6Zfbmr56YbAyWZ3rzAhRcT7tTF5ha", WalletTag::Coinbase),
-    ("D6gCBB3CZEMNbX1PDr3GtZAMhnebEumcgJ2yv8Etv5hF", WalletTag::Coinbase),
-    ("FUKB7YPxP3vVQ4nry7LAzFcyUqPvswH6ciyRoReUYm7f", WalletTag::Coinbase),
-    ("H8sMJSCQxfKiFTCfDR3DUMLPwcRbM61LGFJ8N4dK3WjS", WalletTag::Coinbase),
-    ("8mQnMuApYmNouGvj9wVL2Sh21DFsrzb3sbbFL3rUHXr5", WalletTag::Coinbase),
-    ("GzHZpVPqDLK7sV6cFskSC4qaDzYWYryhf51VoFPtUvfz", WalletTag::Coinbase),
-    ("2PoMLnppbphUWkNReF15BJ4a6c4B348GnStSEv9tFsY1", WalletTag::Coinbase),
-    ("BmGyWBMEcjJD7JQD1jRJ5vEt7XX2LyVvtxwtTGV4N1bp", WalletTag::Coinbase),
-    ("GXTrXayxMJUujsRTxYjAbkdbNvs6u2KN89UpG8f6eMAg", WalletTag::Coinbase),
-    ("DPqsobysNf5iA9w7zrQM8HLzCKZEDMkZsWbiidsAt1xo", WalletTag::Coinbase),
-    ("GJRs4FwHtemZ5ZE9x3FNvJ8TMwitKTh21yxdRPqn7npE", WalletTag::Coinbase),
-    ("85cPov8nuRCkJ88VNMcHaHZ26Ux85PbSrHW4jg7izW4h", WalletTag::Coinbase),
-    ("FpwQQhQQoEaVu3WU2qZMfF1hx48YyfwsLoRgXG83E99Q", WalletTag::Coinbase),
+    (
+        "3qP77PzrHxSrW1S8dH4Ss1dmpJDHpC6ATVgwy5FmXDEf",
+        WalletTag::Coinbase,
+    ),
+    (
+        "9obNtb5GyUegcs3a1CbBkLuc5hEWynWfJC6gjz5uWQkE",
+        WalletTag::Coinbase,
+    ),
+    (
+        "VTvk7sG6QQ28iK3NEKRRD9fvPzk5pKpJL2iwgVqMFcL",
+        WalletTag::Coinbase,
+    ),
+    (
+        "4pHKEisSmAr5CSump4dJnTJgG6eugmtieXcUxDBcQcG5",
+        WalletTag::Coinbase,
+    ),
+    (
+        "CKy3KzEMSL1PQV6Wppggoqi2nGA7teE4L7JipEK89yqj",
+        WalletTag::Coinbase,
+    ),
+    (
+        "2AQdpHJ2JpcEgPiATUXjQxA8QmafFegfQwSLWSprPicm",
+        WalletTag::Coinbase,
+    ),
+    (
+        "D89hHJT5Aqyx1trP6EnGY9jJUB3whgnq3aUvvCqedvzf",
+        WalletTag::Coinbase,
+    ),
+    (
+        "AzAvbCQsXurd2PbGLYcB61tyvE8kLDaZShE1S5Bp3WeS",
+        WalletTag::Coinbase,
+    ),
+    (
+        "6LzKPJ1Y6wdYTLfGDxe9WwoKpwAVMLHwXxmQpRgdD6ng",
+        WalletTag::Coinbase,
+    ),
+    (
+        "59L2oxymiQQ9Hvhh92nt8Y7nDYjsauFkdb3SybdnsG6h",
+        WalletTag::Coinbase,
+    ),
+    (
+        "3vxheE5C46XzK4XftziRhwAf8QAfipD7HXXWj25mgkom",
+        WalletTag::Coinbase,
+    ),
+    (
+        "py5jDEUAynTufQHM7P6Tu9M8NUd8JYux7aMcLXcC51q",
+        WalletTag::Coinbase,
+    ),
+    (
+        "F4C34HorTSr8C7Zmwj8Kdrbmq5XjV9d8iJywp74L8sZf",
+        WalletTag::Coinbase,
+    ),
+    (
+        "146yGthSmnTPuCo6Zfbmr56YbAyWZ3rzAhRcT7tTF5ha",
+        WalletTag::Coinbase,
+    ),
+    (
+        "D6gCBB3CZEMNbX1PDr3GtZAMhnebEumcgJ2yv8Etv5hF",
+        WalletTag::Coinbase,
+    ),
+    (
+        "FUKB7YPxP3vVQ4nry7LAzFcyUqPvswH6ciyRoReUYm7f",
+        WalletTag::Coinbase,
+    ),
+    (
+        "H8sMJSCQxfKiFTCfDR3DUMLPwcRbM61LGFJ8N4dK3WjS",
+        WalletTag::Coinbase,
+    ),
+    (
+        "8mQnMuApYmNouGvj9wVL2Sh21DFsrzb3sbbFL3rUHXr5",
+        WalletTag::Coinbase,
+    ),
+    (
+        "GzHZpVPqDLK7sV6cFskSC4qaDzYWYryhf51VoFPtUvfz",
+        WalletTag::Coinbase,
+    ),
+    (
+        "2PoMLnppbphUWkNReF15BJ4a6c4B348GnStSEv9tFsY1",
+        WalletTag::Coinbase,
+    ),
+    (
+        "BmGyWBMEcjJD7JQD1jRJ5vEt7XX2LyVvtxwtTGV4N1bp",
+        WalletTag::Coinbase,
+    ),
+    (
+        "GXTrXayxMJUujsRTxYjAbkdbNvs6u2KN89UpG8f6eMAg",
+        WalletTag::Coinbase,
+    ),
+    (
+        "DPqsobysNf5iA9w7zrQM8HLzCKZEDMkZsWbiidsAt1xo",
+        WalletTag::Coinbase,
+    ),
+    (
+        "GJRs4FwHtemZ5ZE9x3FNvJ8TMwitKTh21yxdRPqn7npE",
+        WalletTag::Coinbase,
+    ),
+    (
+        "85cPov8nuRCkJ88VNMcHaHZ26Ux85PbSrHW4jg7izW4h",
+        WalletTag::Coinbase,
+    ),
+    (
+        "FpwQQhQQoEaVu3WU2qZMfF1hx48YyfwsLoRgXG83E99Q",
+        WalletTag::Coinbase,
+    ),
     // Binance
-    ("3yFwqXBfZY4jBVUafQ1YEXw189y2dN3V5KQq9uzBDy1E", WalletTag::Binance),
-    ("3gd3dqgtJ4jWfBfLYTX67DALFetjc5iS72sCgRhCkW2u", WalletTag::Binance),
-    ("9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM", WalletTag::Binance),
-    ("6QJzieMYfp7yr3EdrePaQoG3Ghxs2wM98xSLRu8Xh56U", WalletTag::Binance),
-    ("5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9", WalletTag::Binance),
-    ("2ojv9BAiHUrvsm9gxDe7fJSzbNZSJcxZvf8dqmWGHG8S", WalletTag::Binance),
-    ("G7vNg68KfbjVLCTc8Uw9JVmaC4ZajpX97ApkToBqvviy", WalletTag::Binance),
-    ("GBrURzmtWujJRTA3Bkvo7ZgWuZYLMMwPCwre7BejJXnK", WalletTag::Binance),
+    (
+        "3yFwqXBfZY4jBVUafQ1YEXw189y2dN3V5KQq9uzBDy1E",
+        WalletTag::Binance,
+    ),
+    (
+        "3gd3dqgtJ4jWfBfLYTX67DALFetjc5iS72sCgRhCkW2u",
+        WalletTag::Binance,
+    ),
+    (
+        "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+        WalletTag::Binance,
+    ),
+    (
+        "6QJzieMYfp7yr3EdrePaQoG3Ghxs2wM98xSLRu8Xh56U",
+        WalletTag::Binance,
+    ),
+    (
+        "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9",
+        WalletTag::Binance,
+    ),
+    (
+        "2ojv9BAiHUrvsm9gxDe7fJSzbNZSJcxZvf8dqmWGHG8S",
+        WalletTag::Binance,
+    ),
+    (
+        "G7vNg68KfbjVLCTc8Uw9JVmaC4ZajpX97ApkToBqvviy",
+        WalletTag::Binance,
+    ),
+    (
+        "GBrURzmtWujJRTA3Bkvo7ZgWuZYLMMwPCwre7BejJXnK",
+        WalletTag::Binance,
+    ),
     // KuCoin
-    ("DBmae92YTQKLsNzXcPscxiwPqMcz9stQr2prB5ZCAHPd", WalletTag::KuCoin),
-    ("HVh6wHNBAsG3pq1Bj5oCzRjoWKVogEDHwUHkRz3ekFgt", WalletTag::KuCoin),
-    ("BmFdpraQhkiDQE6SnfG5omcA1VwzqfXrwtNYBwWTymy6", WalletTag::KuCoin),
-    ("57vSaRTqN9iXaemgh4AoDsZ63mcaoshfMK8NP3Z5QNbs", WalletTag::KuCoin),
+    (
+        "DBmae92YTQKLsNzXcPscxiwPqMcz9stQr2prB5ZCAHPd",
+        WalletTag::KuCoin,
+    ),
+    (
+        "HVh6wHNBAsG3pq1Bj5oCzRjoWKVogEDHwUHkRz3ekFgt",
+        WalletTag::KuCoin,
+    ),
+    (
+        "BmFdpraQhkiDQE6SnfG5omcA1VwzqfXrwtNYBwWTymy6",
+        WalletTag::KuCoin,
+    ),
+    (
+        "57vSaRTqN9iXaemgh4AoDsZ63mcaoshfMK8NP3Z5QNbs",
+        WalletTag::KuCoin,
+    ),
     // Bithumb
-    ("8Mm46CsqxiyAputDUp2cXHg41HE3BfynTeMBDwzrMZQH", WalletTag::Bithumb),
-    ("H13inzihSqSgfhHrGXNcrhMPzZmp73Mjs1tu8PrnFN7K", WalletTag::Bithumb),
-    ("D5LmzoS7PXmT8oMVpSY1iSk1bZD2XLsc9nE5rSmwvyuQ", WalletTag::Bithumb),
-    ("EqfdXQTL9r8yzjgeTx3nceJBxH3gAMBjiQrUzsf6oRhx", WalletTag::Bithumb),
+    (
+        "8Mm46CsqxiyAputDUp2cXHg41HE3BfynTeMBDwzrMZQH",
+        WalletTag::Bithumb,
+    ),
+    (
+        "H13inzihSqSgfhHrGXNcrhMPzZmp73Mjs1tu8PrnFN7K",
+        WalletTag::Bithumb,
+    ),
+    (
+        "D5LmzoS7PXmT8oMVpSY1iSk1bZD2XLsc9nE5rSmwvyuQ",
+        WalletTag::Bithumb,
+    ),
+    (
+        "EqfdXQTL9r8yzjgeTx3nceJBxH3gAMBjiQrUzsf6oRhx",
+        WalletTag::Bithumb,
+    ),
     // Crypto.com
-    ("AobVSwdW9BbpMdJvTqeCN4hPAmh4rHm7vwLnQ5ATSyrS", WalletTag::CryptoCom),
-    ("6FEVkH17P9y8Q9aCkDdPcMDjvj7SVxrTETaYEm8f51Jy", WalletTag::CryptoCom),
-    ("22Wnk8PwyWZV7BfkZGJEKT9jGGdtvu7xY6EXeRh7zkBa", WalletTag::CryptoCom),
+    (
+        "AobVSwdW9BbpMdJvTqeCN4hPAmh4rHm7vwLnQ5ATSyrS",
+        WalletTag::CryptoCom,
+    ),
+    (
+        "6FEVkH17P9y8Q9aCkDdPcMDjvj7SVxrTETaYEm8f51Jy",
+        WalletTag::CryptoCom,
+    ),
+    (
+        "22Wnk8PwyWZV7BfkZGJEKT9jGGdtvu7xY6EXeRh7zkBa",
+        WalletTag::CryptoCom,
+    ),
     // Upbit
-    ("WR87TKyUfMDzGojFvRxq2f1xf7Jcgkvoc7Z2tDVLHdY", WalletTag::Upbit),
-    ("3jn81xbBK95zf5A1K4jRMzTicWxKM6X8BzYWzhPtFjuF", WalletTag::Upbit),
-    ("6VGNcrNuhwCwWZDQoA9QoyJxKtb4FEGLnieScUnLbeKJ", WalletTag::Upbit),
-    ("2kmT6TAgwy2aPt4wtiSmmosyTZ8kVRSXwXxtbgJ8QfLM", WalletTag::Upbit),
-    ("836euAuAeEWdjHFZ87vKhR6n4Vu1V22yMvj1MyzCdVU3", WalletTag::Upbit),
-    ("8jjpnSUhm5UYghznhcdkwwEUFyke6z5TchHEtUUgW8hX", WalletTag::Upbit),
-    ("A5QtrjyeJLZ62HqSZAmiqAboiBJZX3eQbCe4QSLBGXXN", WalletTag::Upbit),
-    ("2YERiDP8JqbmKDDUhPQtEfWozafQm1cdwi6KrmYo2app", WalletTag::Upbit),
-    ("7mhcgF1DVsj5iv4CxZDgp51H6MBBwqamsH1KnqXhSRc5", WalletTag::Upbit),
-    ("2nE99H3e9gfbxKaGodnTwixMgZwgTtKg45aoCFwdEfJS", WalletTag::Upbit),
-    ("Ahgd7ZczsP6XcWuhsF1Hn7i9W31uHMMPkmffrALL7ers", WalletTag::Upbit),
-    ("6mearRPb9Bma9Ad9wCKnGtVbTeqDyZQ6PPxDRpBUNdJU", WalletTag::Upbit),
+    (
+        "WR87TKyUfMDzGojFvRxq2f1xf7Jcgkvoc7Z2tDVLHdY",
+        WalletTag::Upbit,
+    ),
+    (
+        "3jn81xbBK95zf5A1K4jRMzTicWxKM6X8BzYWzhPtFjuF",
+        WalletTag::Upbit,
+    ),
+    (
+        "6VGNcrNuhwCwWZDQoA9QoyJxKtb4FEGLnieScUnLbeKJ",
+        WalletTag::Upbit,
+    ),
+    (
+        "2kmT6TAgwy2aPt4wtiSmmosyTZ8kVRSXwXxtbgJ8QfLM",
+        WalletTag::Upbit,
+    ),
+    (
+        "836euAuAeEWdjHFZ87vKhR6n4Vu1V22yMvj1MyzCdVU3",
+        WalletTag::Upbit,
+    ),
+    (
+        "8jjpnSUhm5UYghznhcdkwwEUFyke6z5TchHEtUUgW8hX",
+        WalletTag::Upbit,
+    ),
+    (
+        "A5QtrjyeJLZ62HqSZAmiqAboiBJZX3eQbCe4QSLBGXXN",
+        WalletTag::Upbit,
+    ),
+    (
+        "2YERiDP8JqbmKDDUhPQtEfWozafQm1cdwi6KrmYo2app",
+        WalletTag::Upbit,
+    ),
+    (
+        "7mhcgF1DVsj5iv4CxZDgp51H6MBBwqamsH1KnqXhSRc5",
+        WalletTag::Upbit,
+    ),
+    (
+        "2nE99H3e9gfbxKaGodnTwixMgZwgTtKg45aoCFwdEfJS",
+        WalletTag::Upbit,
+    ),
+    (
+        "Ahgd7ZczsP6XcWuhsF1Hn7i9W31uHMMPkmffrALL7ers",
+        WalletTag::Upbit,
+    ),
+    (
+        "6mearRPb9Bma9Ad9wCKnGtVbTeqDyZQ6PPxDRpBUNdJU",
+        WalletTag::Upbit,
+    ),
     // Other Exchanges
-    ("FyJBKcfcEBzGN74uNxZ95GxnCxeuJJujQCELpPv14ZfN", WalletTag::Bitfinex),
-    ("FxteHmLwG9nk1eL4pjNve3Eub2goGkkz6g6TbvdmW46a", WalletTag::Bitfinex),
-    ("F7RkX6Y1qTfBqoX5oHoZEgrG1Dpy55UZ3GfWwPbM58nQ", WalletTag::Kraken),
-    ("9cNE6KBg2Xmf34FPMMvzDF8yUHMrgLRzBV3vD7b1JnUS", WalletTag::Kraken),
-    ("FWznbcNXWQuHTawe9RxvQ2LdCENssh12dsznf4RiouN5", WalletTag::Kraken),
-    ("A77HErqtfN1hLLpvZ9pCtu66FEtM8BveoaKbbMoZ4RiR", WalletTag::Bitget),
-    ("HBxZShcE86UMmF93KUM8eWJKqeEXi5cqWCLYLMMhqMYm", WalletTag::Bitstamp),
-    ("DTNnXBh7JcKTzfWbqcuNYaYBQXS2fWWoXEdJ5iyNwvFX", WalletTag::Bitstamp),
-    ("DLY8RdtrGELZh7Dnmf1tm99sfcXh6KdMtgjgRD1m1uQ7", WalletTag::Bitstamp),
-    ("i57ExrKB2i4mSgjSuq2xz617mQXmu33WG2WEYypmdvX", WalletTag::Bitstamp),
-    ("ASTyfSima4LLAdDgoFGkgqoKowG1LZFDr9fAQrg7iaJZ", WalletTag::MEXC),
-    ("5PAhQiYdLBd6SVdjzBQDxUAEFyDdF5ExNPQfcscnPRj5", WalletTag::MEXC),
-    ("42brAgAVNzMBP7aaktPvAmBSPEkehnFQejiZc53EpJFd", WalletTag::Bybit),
-    ("AC5RDfQFmDS1deWZos921JfqscXdByf8BKHs5ACWjtW2", WalletTag::Bybit),
-    ("43DbAvKxhXh1oSxkJSqGosNw3HpBnmsWiak6tB5wpecN", WalletTag::Backpack),
-    ("BbHG9GvPActFGogv3iNrpDAj4qpXr8t3jF16uGxXcKci", WalletTag::Backpack),
-    ("4GC3a1RkRXx5shwGP8pTY6cxXgSWkbfc66vM53a6qSKj", WalletTag::CoinSpot),
-    ("53unSgGWqEWANcPYRF35B2Bgf8BkszUtcccKiXwGGLyr", WalletTag::BinanceUS),
-    ("is6MTRHEgyFLNTfYcuV4QBWLjrZBfmhVNYR6ccgr8KV", WalletTag::OKX),
-    ("9un5wqE3q4oCjyrDkwsdD48KteCJitQX5978Vh7KKxHo", WalletTag::OKX),
-    ("5VCwKtCXgCJ6kit5FybXjvriW3xELsFDhYrPSqtJNmcD", WalletTag::OKX),
-    ("u6PJ8DtQuPFnfmwHbGFULQ4u4EgjDiyYKjVEsynXq2w", WalletTag::GateIO),
-    ("HiRpdAZifEsZGdzQ5Xo5wcnaH3D2Jj9SoNsUzcYNK78J", WalletTag::GateIO),
-    ("Fe7SEekiKygziaEGKxsDsgLVzrCfNvVBvAYsaJBwFA8s", WalletTag::SwissBorg),
-    ("2E1UKoiiZPwsp4vn6tUh5k61kG2UqYpT7oBrFaJUJXXd", WalletTag::SwissBorg),
-    ("6brjeZNfSpqjWoo16z1YbywKguAruXZhNz9bJMVZE8pD", WalletTag::Robinhood),
-    ("AeBwztwXScyNNuQCEdhS54wttRQrw3Nj1UtqddzB4C7b", WalletTag::Robinhood),
-    ("8Tp9fFkZ2KcRBLYDTUNXo98Ez6ojGb6MZEPXfGDdeBzG", WalletTag::Robinhood),
-    ("9FtGm6hJULCpA8An4sFg5ysHUExDZBtMeDCxsYnTnWh5", WalletTag::Robinhood),
-    ("6b4aypBhH337qSzzkbeoHWzTLt4DjG2aG8GkrrTQJfQA", WalletTag::FTX),
-    ("9uyDy9VDBw4K7xoSkhmCAm8NAFCwu4pkF6JeHUCtVKcX", WalletTag::FTX),
+    (
+        "FyJBKcfcEBzGN74uNxZ95GxnCxeuJJujQCELpPv14ZfN",
+        WalletTag::Bitfinex,
+    ),
+    (
+        "FxteHmLwG9nk1eL4pjNve3Eub2goGkkz6g6TbvdmW46a",
+        WalletTag::Bitfinex,
+    ),
+    (
+        "F7RkX6Y1qTfBqoX5oHoZEgrG1Dpy55UZ3GfWwPbM58nQ",
+        WalletTag::Kraken,
+    ),
+    (
+        "9cNE6KBg2Xmf34FPMMvzDF8yUHMrgLRzBV3vD7b1JnUS",
+        WalletTag::Kraken,
+    ),
+    (
+        "FWznbcNXWQuHTawe9RxvQ2LdCENssh12dsznf4RiouN5",
+        WalletTag::Kraken,
+    ),
+    (
+        "A77HErqtfN1hLLpvZ9pCtu66FEtM8BveoaKbbMoZ4RiR",
+        WalletTag::Bitget,
+    ),
+    (
+        "HBxZShcE86UMmF93KUM8eWJKqeEXi5cqWCLYLMMhqMYm",
+        WalletTag::Bitstamp,
+    ),
+    (
+        "DTNnXBh7JcKTzfWbqcuNYaYBQXS2fWWoXEdJ5iyNwvFX",
+        WalletTag::Bitstamp,
+    ),
+    (
+        "DLY8RdtrGELZh7Dnmf1tm99sfcXh6KdMtgjgRD1m1uQ7",
+        WalletTag::Bitstamp,
+    ),
+    (
+        "i57ExrKB2i4mSgjSuq2xz617mQXmu33WG2WEYypmdvX",
+        WalletTag::Bitstamp,
+    ),
+    (
+        "ASTyfSima4LLAdDgoFGkgqoKowG1LZFDr9fAQrg7iaJZ",
+        WalletTag::MEXC,
+    ),
+    (
+        "5PAhQiYdLBd6SVdjzBQDxUAEFyDdF5ExNPQfcscnPRj5",
+        WalletTag::MEXC,
+    ),
+    (
+        "42brAgAVNzMBP7aaktPvAmBSPEkehnFQejiZc53EpJFd",
+        WalletTag::Bybit,
+    ),
+    (
+        "AC5RDfQFmDS1deWZos921JfqscXdByf8BKHs5ACWjtW2",
+        WalletTag::Bybit,
+    ),
+    (
+        "43DbAvKxhXh1oSxkJSqGosNw3HpBnmsWiak6tB5wpecN",
+        WalletTag::Backpack,
+    ),
+    (
+        "BbHG9GvPActFGogv3iNrpDAj4qpXr8t3jF16uGxXcKci",
+        WalletTag::Backpack,
+    ),
+    (
+        "4GC3a1RkRXx5shwGP8pTY6cxXgSWkbfc66vM53a6qSKj",
+        WalletTag::CoinSpot,
+    ),
+    (
+        "53unSgGWqEWANcPYRF35B2Bgf8BkszUtcccKiXwGGLyr",
+        WalletTag::BinanceUS,
+    ),
+    (
+        "is6MTRHEgyFLNTfYcuV4QBWLjrZBfmhVNYR6ccgr8KV",
+        WalletTag::OKX,
+    ),
+    (
+        "9un5wqE3q4oCjyrDkwsdD48KteCJitQX5978Vh7KKxHo",
+        WalletTag::OKX,
+    ),
+    (
+        "5VCwKtCXgCJ6kit5FybXjvriW3xELsFDhYrPSqtJNmcD",
+        WalletTag::OKX,
+    ),
+    (
+        "u6PJ8DtQuPFnfmwHbGFULQ4u4EgjDiyYKjVEsynXq2w",
+        WalletTag::GateIO,
+    ),
+    (
+        "HiRpdAZifEsZGdzQ5Xo5wcnaH3D2Jj9SoNsUzcYNK78J",
+        WalletTag::GateIO,
+    ),
+    (
+        "Fe7SEekiKygziaEGKxsDsgLVzrCfNvVBvAYsaJBwFA8s",
+        WalletTag::SwissBorg,
+    ),
+    (
+        "2E1UKoiiZPwsp4vn6tUh5k61kG2UqYpT7oBrFaJUJXXd",
+        WalletTag::SwissBorg,
+    ),
+    (
+        "6brjeZNfSpqjWoo16z1YbywKguAruXZhNz9bJMVZE8pD",
+        WalletTag::Robinhood,
+    ),
+    (
+        "AeBwztwXScyNNuQCEdhS54wttRQrw3Nj1UtqddzB4C7b",
+        WalletTag::Robinhood,
+    ),
+    (
+        "8Tp9fFkZ2KcRBLYDTUNXo98Ez6ojGb6MZEPXfGDdeBzG",
+        WalletTag::Robinhood,
+    ),
+    (
+        "9FtGm6hJULCpA8An4sFg5ysHUExDZBtMeDCxsYnTnWh5",
+        WalletTag::Robinhood,
+    ),
+    (
+        "6b4aypBhH337qSzzkbeoHWzTLt4DjG2aG8GkrrTQJfQA",
+        WalletTag::FTX,
+    ),
+    (
+        "9uyDy9VDBw4K7xoSkhmCAm8NAFCwu4pkF6JeHUCtVKcX",
+        WalletTag::FTX,
+    ),
 ];

@@ -1,7 +1,9 @@
 use crate::database::insert_rows;
 use crate::services::price_service::PriceService;
-use crate::types::{EventPayload, EventType, MigrationRow, MintRow, TokenMetricsRow, TokenStaticRow, TradeRow};
-use anyhow::{anyhow, Result, Context};
+use crate::types::{
+    EventPayload, EventType, MigrationRow, MintRow, TokenMetricsRow, TokenStaticRow, TradeRow,
+};
+use anyhow::{Context, Result, anyhow};
 use borsh::BorshDeserialize;
 use clickhouse::Client;
 use futures_util::future;
@@ -17,8 +19,8 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use std::time::Duration;
+use tokio::sync::RwLock;
 
 type TokenCache = HashMap<String, TokenEntry>;
 
@@ -30,7 +32,8 @@ struct TokenEntry {
 
 impl TokenEntry {
     fn new(token: TokenStaticRow, metrics: Option<TokenMetricsRow>) -> Self {
-        let metrics = metrics.unwrap_or_else(|| TokenMetricsRow::new(token.token_address.clone(), token.updated_at));
+        let metrics = metrics
+            .unwrap_or_else(|| TokenMetricsRow::new(token.token_address.clone(), token.updated_at));
         Self { token, metrics }
     }
 }
@@ -44,7 +47,12 @@ struct TokenContext {
 }
 
 impl TokenContext {
-    fn new(timestamp: u32, protocol: Option<u8>, pool_address: Option<String>, decimals: Option<u8>) -> Self {
+    fn new(
+        timestamp: u32,
+        protocol: Option<u8>,
+        pool_address: Option<String>,
+        decimals: Option<u8>,
+    ) -> Self {
         Self {
             timestamp,
             protocol,
@@ -67,14 +75,11 @@ fn record_token_context(
     }
 
     let mut pool_for_insert = pool_address.clone();
-    let entry = contexts.entry(token_address.to_string()).or_insert_with(|| {
-        TokenContext::new(
-            timestamp,
-            protocol,
-            pool_for_insert.take(),
-            decimals,
-        )
-    });
+    let entry = contexts
+        .entry(token_address.to_string())
+        .or_insert_with(|| {
+            TokenContext::new(timestamp, protocol, pool_for_insert.take(), decimals)
+        });
 
     if timestamp < entry.timestamp {
         entry.timestamp = timestamp;
@@ -136,17 +141,23 @@ pub struct TokenAggregator {
 
 impl TokenAggregator {
     pub async fn new(
-        db_client: Client, 
-        redis_client: RedisClient, 
+        db_client: Client,
+        redis_client: RedisClient,
         rpc_client: Arc<RpcClient>,
         price_service: PriceService,
     ) -> Result<Self> {
         let redis_conn = redis_client.get_multiplexed_async_connection().await?;
         println!("[TokenAggregator] ✔️ Connected to ClickHouse, Redis, and Solana RPC.");
 
-        let backfill_mode = env::var("BACKFILL_MODE")
-            .unwrap_or_else(|_| "false".to_string()) == "true";
-        Ok(Self { db_client, redis_conn, rpc_client, price_service, backfill_mode })
+        let backfill_mode =
+            env::var("BACKFILL_MODE").unwrap_or_else(|_| "false".to_string()) == "true";
+        Ok(Self {
+            db_client,
+            redis_conn,
+            rpc_client,
+            price_service,
+            backfill_mode,
+        })
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -157,46 +168,88 @@ impl TokenAggregator {
         let mut publisher_conn = self.redis_conn.clone();
         let next_queue = "wallet_agg_queue";
 
-        let result: redis::RedisResult<()> = self.redis_conn.xgroup_create_mkstream(stream_key, group_name, "0").await;
+        let result: redis::RedisResult<()> = self
+            .redis_conn
+            .xgroup_create_mkstream(stream_key, group_name, "0")
+            .await;
         if let Err(e) = result {
-            if !e.to_string().contains("BUSYGROUP") { return Err(anyhow!("[TokenAggregator] Failed to create consumer group: {}", e)); }
-            println!("[TokenAggregator] Consumer group '{}' already exists. Resuming.", group_name);
+            if !e.to_string().contains("BUSYGROUP") {
+                return Err(anyhow!(
+                    "[TokenAggregator] Failed to create consumer group: {}",
+                    e
+                ));
+            }
+            println!(
+                "[TokenAggregator] Consumer group '{}' already exists. Resuming.",
+                group_name
+            );
         } else {
-            println!("[TokenAggregator] Created new consumer group '{}'.", group_name);
+            println!(
+                "[TokenAggregator] Created new consumer group '{}'.",
+                group_name
+            );
         }
 
         loop {
-            let messages = match self.collect_events(stream_key, group_name, &consumer_name).await {
+            let messages = match self
+                .collect_events(stream_key, group_name, &consumer_name)
+                .await
+            {
                 Ok(msgs) => msgs,
                 Err(e) => {
-                    eprintln!("[TokenAggregator] 🔴 Error reading from Redis: {}. Retrying...", e);
+                    eprintln!(
+                        "[TokenAggregator] 🔴 Error reading from Redis: {}. Retrying...",
+                        e
+                    );
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     continue;
                 }
             };
-            if messages.is_empty() { continue; }
+            if messages.is_empty() {
+                continue;
+            }
 
-            println!("[TokenAggregator] ⚙️ Starting processing for a new batch of {} events...", messages.len());
+            println!(
+                "[TokenAggregator] ⚙️ Starting processing for a new batch of {} events...",
+                messages.len()
+            );
             let message_ids: Vec<String> = messages.iter().map(|(id, _)| id.clone()).collect();
-            let payloads: Vec<EventPayload> = messages.into_iter().map(|(_, payload)| payload).collect();
+            let payloads: Vec<EventPayload> =
+                messages.into_iter().map(|(_, payload)| payload).collect();
 
-            match self.process_batch(payloads.clone()).await { // Clone payloads to use them after processing
+            match self.process_batch(payloads.clone()).await {
+                // Clone payloads to use them after processing
                 Ok(_) => {
                     if !message_ids.is_empty() {
                         // Forward each payload to the next queue in the pipeline
                         for payload in payloads {
                             let payload_data = bincode::serialize(&payload)?;
-                            let _: () = publisher_conn.xadd(next_queue, "*", &[("payload", payload_data)]).await?;
+                            let _: () = publisher_conn
+                                .xadd(next_queue, "*", &[("payload", payload_data)])
+                                .await?;
                         }
-                        println!("[TokenAggregator] ✅ Finished batch, forwarded {} events to {}.", message_ids.len(), next_queue);
-                        
+                        println!(
+                            "[TokenAggregator] ✅ Finished batch, forwarded {} events to {}.",
+                            message_ids.len(),
+                            next_queue
+                        );
+
                         // Acknowledge the message from the source queue ('event_queue')
-                        let _: () = self.redis_conn.xack(stream_key, group_name, &message_ids).await?;
-                        let _: i64 = self.redis_conn.xdel::<_, _, i64>(stream_key, &message_ids).await?;
+                        let _: () = self
+                            .redis_conn
+                            .xack(stream_key, group_name, &message_ids)
+                            .await?;
+                        let _: i64 = self
+                            .redis_conn
+                            .xdel::<_, _, i64>(stream_key, &message_ids)
+                            .await?;
                     }
                 }
                 Err(e) => {
-                    eprintln!("[TokenAggregator] ❌ Failed to process batch, will not forward or ACK. Error: {}", e);
+                    eprintln!(
+                        "[TokenAggregator] ❌ Failed to process batch, will not forward or ACK. Error: {}",
+                        e
+                    );
                 }
             }
         }
@@ -277,7 +330,8 @@ impl TokenAggregator {
                         p.timestamp,
                         Some(p.protocol),
                         (!p.pool_address.is_empty()).then(|| p.pool_address.clone()),
-                        p.base_decimals.or_else(|| decimals_map.get(&p.base_address).cloned()),
+                        p.base_decimals
+                            .or_else(|| decimals_map.get(&p.base_address).cloned()),
                     );
                     record_token_context(
                         &mut token_contexts,
@@ -285,7 +339,8 @@ impl TokenAggregator {
                         p.timestamp,
                         Some(p.protocol),
                         (!p.pool_address.is_empty()).then(|| p.pool_address.clone()),
-                        p.quote_decimals.or_else(|| decimals_map.get(&p.quote_address).cloned()),
+                        p.quote_decimals
+                            .or_else(|| decimals_map.get(&p.quote_address).cloned()),
                     );
                 }
                 EventType::Transfer(t) => {
@@ -359,9 +414,9 @@ impl TokenAggregator {
             );
 
             if !self.backfill_mode {
-                let fetch_futures = missing_tokens.iter().map(|key| {
-                    async move { (key.clone(), self.fetch_token_metadata(key).await) }
-                });
+                let fetch_futures = missing_tokens
+                    .iter()
+                    .map(|key| async move { (key.clone(), self.fetch_token_metadata(key).await) });
                 let fetched_results = future::join_all(fetch_futures).await;
 
                 for (key, rpc_result) in fetched_results {
@@ -372,7 +427,10 @@ impl TokenAggregator {
                     let protocol = context.protocol.unwrap_or(0);
                     let token_row = match rpc_result {
                         Ok((metadata, mint_data)) => {
-                            println!("[TokenAggregator] -> ✅ Successfully fetched metadata for new token {}.", key);
+                            println!(
+                                "[TokenAggregator] -> ✅ Successfully fetched metadata for new token {}.",
+                                key
+                            );
 
                             let creator = metadata
                                 .creators
@@ -394,12 +452,17 @@ impl TokenAggregator {
                                 mint_data.supply,
                                 metadata.is_mutable,
                                 Some(metadata.update_authority.to_string()),
-                                Option::from(mint_data.mint_authority).map(|pk: Pubkey| pk.to_string()),
-                                Option::from(mint_data.freeze_authority).map(|pk: Pubkey| pk.to_string()),
+                                Option::from(mint_data.mint_authority)
+                                    .map(|pk: Pubkey| pk.to_string()),
+                                Option::from(mint_data.freeze_authority)
+                                    .map(|pk: Pubkey| pk.to_string()),
                             )
                         }
                         Err(e) => {
-                            eprintln!("[TokenAggregator] -> ❌ RPC failed for {}: {}. Creating placeholder.", key, e);
+                            eprintln!(
+                                "[TokenAggregator] -> ❌ RPC failed for {}: {}. Creating placeholder.",
+                                key, e
+                            );
                             TokenStaticRow::new(
                                 key.clone(),
                                 context.timestamp,
@@ -449,13 +512,16 @@ impl TokenAggregator {
             }
         }
 
-        let trader_pairs_in_batch: Vec<(String, String)> = payloads.iter().filter_map(|p| {
-            if let EventType::Trade(t) = &p.event {
-                Some((t.base_address.clone(), t.maker.clone()))
-            } else {
-                None
-            }
-        }).collect();
+        let trader_pairs_in_batch: Vec<(String, String)> = payloads
+            .iter()
+            .filter_map(|p| {
+                if let EventType::Trade(t) = &p.event {
+                    Some((t.base_address.clone(), t.maker.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         let mut existing_traders = HashSet::new();
         if !trader_pairs_in_batch.is_empty() {
@@ -463,12 +529,12 @@ impl TokenAggregator {
                 .query("SELECT DISTINCT (mint_address, wallet_address) FROM wallet_holdings WHERE (mint_address, wallet_address) IN ?")
                 .bind(trader_pairs_in_batch)
                 .fetch::<(String, String)>()?;
-            
+
             while let Some(pair) = cursor.next().await? {
                 existing_traders.insert(pair);
             }
         }
-        
+
         let mut counted_in_this_batch: HashSet<(String, String)> = HashSet::new();
 
         for payload in payloads.iter() {
@@ -478,22 +544,27 @@ impl TokenAggregator {
             match &payload.event {
                 EventType::Mint(mint) => self.process_mint(mint, &mut tokens),
                 EventType::Trade(trade) => {
-                    self.process_trade(trade, &mut tokens, &existing_traders, &mut counted_in_this_batch);
+                    self.process_trade(
+                        trade,
+                        &mut tokens,
+                        &existing_traders,
+                        &mut counted_in_this_batch,
+                    );
                 }
                 EventType::Migration(migration) => self.process_migration(migration, &mut tokens),
                 _ => {}
             }
         }
-        
+
         self.finalize_and_persist(tokens).await
     }
 
     fn process_trade(
-        &self, 
-        trade: &TradeRow, 
-        tokens: &mut TokenCache, 
+        &self,
+        trade: &TradeRow,
+        tokens: &mut TokenCache,
         existing_traders: &HashSet<(String, String)>,
-        counted_in_this_batch: &mut HashSet<(String, String)>
+        counted_in_this_batch: &mut HashSet<(String, String)>,
     ) {
         if let Some(entry) = tokens.get_mut(&trade.base_address) {
             entry.token.updated_at = trade.timestamp;
@@ -512,24 +583,26 @@ impl TokenAggregator {
                     entry.metrics.unique_holders += 1;
                 }
             }
-            
 
             let trade_total_in_usd = trade.total_usd;
 
             entry.metrics.total_volume_usd += trade_total_in_usd;
             entry.metrics.ath_price_usd = entry.metrics.ath_price_usd.max(trade.price_usd);
-            
-            if trade.trade_type == 0 { // Buy
+
+            if trade.trade_type == 0 {
+                // Buy
                 entry.metrics.total_buys += 1;
-            } else { // Sell
+            } else {
+                // Sell
                 entry.metrics.total_sells += 1;
             }
         }
     }
 
-
     async fn fetch_tokens_from_db(&self, keys: &[String]) -> Result<TokenCache> {
-        if keys.is_empty() { return Ok(HashMap::new()); }
+        if keys.is_empty() {
+            return Ok(HashMap::new());
+        }
         // Use argMax to get the latest version of each token, which is the
         // correct approach for MergeTree tables instead of FINAL.
         let query_str = "
@@ -554,10 +627,14 @@ impl TokenAggregator {
             WHERE token_address IN ?
             GROUP BY token_address
         ";
-        
-        let mut cursor = self.db_client.query(query_str).bind(keys).fetch::<TokenStaticRow>()?;
+
+        let mut cursor = self
+            .db_client
+            .query(query_str)
+            .bind(keys)
+            .fetch::<TokenStaticRow>()?;
         let mut statics = HashMap::new();
-        
+
         while let Ok(Some(token)) = cursor.next().await {
             statics.insert(token.token_address.clone(), token);
         }
@@ -573,8 +650,13 @@ impl TokenAggregator {
         Ok(tokens)
     }
 
-    async fn fetch_token_metrics(&self, keys: &[String]) -> Result<HashMap<String, TokenMetricsRow>> {
-        if keys.is_empty() { return Ok(HashMap::new()); }
+    async fn fetch_token_metrics(
+        &self,
+        keys: &[String],
+    ) -> Result<HashMap<String, TokenMetricsRow>> {
+        if keys.is_empty() {
+            return Ok(HashMap::new());
+        }
 
         let query_str = "
             SELECT
@@ -590,7 +672,11 @@ impl TokenAggregator {
             GROUP BY token_address
         ";
 
-        let mut cursor = self.db_client.query(query_str).bind(keys).fetch::<TokenMetricsRow>()?;
+        let mut cursor = self
+            .db_client
+            .query(query_str)
+            .bind(keys)
+            .fetch::<TokenMetricsRow>()?;
         let mut metrics = HashMap::new();
 
         while let Ok(Some(row)) = cursor.next().await {
@@ -602,19 +688,20 @@ impl TokenAggregator {
 
     async fn fetch_token_metadata(&self, mint_address_str: &str) -> Result<(Metadata, Mint)> {
         let mint_pubkey = Pubkey::from_str(mint_address_str)?;
-        let metadata_pubkey = Metadata::find_pda(&mint_pubkey).0; 
-        
+        let metadata_pubkey = Metadata::find_pda(&mint_pubkey).0;
+
         let (mint_account_res, metadata_account_res) = future::join(
             self.rpc_client.get_account(&mint_pubkey),
-            self.rpc_client.get_account(&metadata_pubkey)
-        ).await;
+            self.rpc_client.get_account(&metadata_pubkey),
+        )
+        .await;
 
         let mint_account = mint_account_res?;
         let metadata_account = metadata_account_res?;
 
         let mint_data = Mint::unpack(&mint_account.data)?;
         let metadata = Metadata::deserialize(&mut &metadata_account.data[..])?;
-        
+
         Ok((metadata, mint_data))
     }
 
@@ -626,9 +713,15 @@ impl TokenAggregator {
         let token = &mut entry.token;
 
         if is_new {
-            println!("[TokenAggregator] -> Created new token record for {} from MINT event.", mint.mint_address);
+            println!(
+                "[TokenAggregator] -> Created new token record for {} from MINT event.",
+                mint.mint_address
+            );
         } else {
-            println!("[TokenAggregator] -> Enriched existing token record for {} with MINT event data.", mint.mint_address);
+            println!(
+                "[TokenAggregator] -> Enriched existing token record for {} with MINT event data.",
+                mint.mint_address
+            );
             token.updated_at = mint.timestamp;
             token.created_at = token.created_at.min(mint.timestamp);
             token.decimals = mint.token_decimals;
@@ -639,9 +732,15 @@ impl TokenAggregator {
             token.update_authority = mint.update_authority.clone();
             token.mint_authority = mint.mint_authority.clone();
             token.freeze_authority = mint.freeze_authority.clone();
-            if token.name.is_empty() { token.name = mint.token_name.clone().unwrap_or_default(); }
-            if token.symbol.is_empty() { token.symbol = mint.token_symbol.clone().unwrap_or_default(); }
-            if token.token_uri.is_empty() { token.token_uri = mint.token_uri.clone().unwrap_or_default(); }
+            if token.name.is_empty() {
+                token.name = mint.token_name.clone().unwrap_or_default();
+            }
+            if token.symbol.is_empty() {
+                token.symbol = mint.token_symbol.clone().unwrap_or_default();
+            }
+            if token.token_uri.is_empty() {
+                token.token_uri = mint.token_uri.clone().unwrap_or_default();
+            }
             if token.creator_address.is_empty() {
                 token.creator_address = mint.creator_address.clone();
             }
@@ -654,7 +753,10 @@ impl TokenAggregator {
     fn process_migration(&self, migration: &MigrationRow, tokens: &mut TokenCache) {
         if let Some(entry) = tokens.get_mut(&migration.mint_address) {
             let token = &mut entry.token;
-            println!("[TokenAggregator] -> Updating protocol for token {} due to migration.", migration.mint_address);
+            println!(
+                "[TokenAggregator] -> Updating protocol for token {} due to migration.",
+                migration.mint_address
+            );
             token.updated_at = migration.timestamp;
             token.protocol = migration.protocol;
             if !token.pool_addresses.contains(&migration.pool_address) {
@@ -662,7 +764,6 @@ impl TokenAggregator {
             }
         }
     }
-
 
     async fn finalize_and_persist(&self, tokens: TokenCache) -> Result<()> {
         if tokens.is_empty() {
@@ -679,13 +780,25 @@ impl TokenAggregator {
             updated_tokens.push(entry.token);
         }
 
-        insert_rows(&self.db_client, "tokens", updated_tokens, "Token Aggregator", "tokens")
-            .await
-            .with_context(|| "Failed to persist token data to ClickHouse")?;
+        insert_rows(
+            &self.db_client,
+            "tokens",
+            updated_tokens,
+            "Token Aggregator",
+            "tokens",
+        )
+        .await
+        .with_context(|| "Failed to persist token data to ClickHouse")?;
 
-        insert_rows(&self.db_client, "token_metrics", metric_rows, "Token Aggregator", "token_metrics")
-            .await
-            .with_context(|| "Failed to persist token metric history to ClickHouse")?;
+        insert_rows(
+            &self.db_client,
+            "token_metrics",
+            metric_rows,
+            "Token Aggregator",
+            "token_metrics",
+        )
+        .await
+        .with_context(|| "Failed to persist token metric history to ClickHouse")?;
 
         Ok(())
     }
@@ -698,9 +811,20 @@ impl TokenAggregator {
             || metrics.ath_price_usd > 0.0
     }
 
-    async fn collect_events(&mut self, stream_key: &str, group_name: &str, consumer_name: &str) -> Result<Vec<(String, EventPayload)>> {
-        let opts = StreamReadOptions::default().group(group_name, consumer_name).count(1000).block(2000);
-        let reply: StreamReadReply = self.redis_conn.xread_options(&[stream_key], &[">"], &opts).await?;
+    async fn collect_events(
+        &mut self,
+        stream_key: &str,
+        group_name: &str,
+        consumer_name: &str,
+    ) -> Result<Vec<(String, EventPayload)>> {
+        let opts = StreamReadOptions::default()
+            .group(group_name, consumer_name)
+            .count(1000)
+            .block(2000);
+        let reply: StreamReadReply = self
+            .redis_conn
+            .xread_options(&[stream_key], &[">"], &opts)
+            .await?;
         let mut events = Vec::new();
         for stream_entry in reply.keys {
             for message in stream_entry.ids {
@@ -715,5 +839,4 @@ impl TokenAggregator {
         }
         Ok(events)
     }
-
 }

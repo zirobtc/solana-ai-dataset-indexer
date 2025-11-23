@@ -2,16 +2,17 @@ use crate::handlers::pump_fun_launchpad_idl::{
     BuyArgs, CollectCreatorFeeEvent, CompletePumpAmmMigrationEvent, CreateArgs, CreateEvent,
     SellArgs, TradeEvent,
 };
-use crate::handlers::{anchor_event_discriminator, constants, Idl};
+use crate::handlers::{Idl, anchor_event_discriminator, constants};
 use crate::types::{
     EventPayload, EventType, FeeCollectionRow, FormattedInstruction, MigrationRow, MintRow,
     TradeRow, UnifiedTransaction,
 };
 use crate::utils::{
-    deserialize_lax, find_account_pubkey_in_instruction, get_asset_balances, get_mev_protection, get_priority_fee, get_tip, get_trading_platform
+    deserialize_lax, find_account_pubkey_in_instruction, get_asset_balances, get_mev_protection,
+    get_priority_fee, get_tip, get_trading_platform,
 };
 use anchor_lang::{AnchorDeserialize, AnchorSerialize};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use serde::Serialize; // <-- Add this line
 use solana_sdk::native_token::LAMPORTS_PER_SOL;
@@ -23,7 +24,6 @@ use std::str::FromStr;
 use yellowstone_grpc_proto::prelude::InnerInstruction;
 
 use super::TransactionHandler;
-
 
 //==============================================================================
 // DECODER LOGIC
@@ -143,8 +143,8 @@ impl PumpFunLaunchpadDecoder {
                             if let Some(instruction) = self.decode_instruction(&inner_ix.data)? {
                                 let remaining_inner_instructions =
                                     &formatted_ix.inner_instructions[inner_idx + 1..];
-                                let event =
-                                    self.find_first_event(remaining_inner_instructions, account_keys)?;
+                                let event = self
+                                    .find_first_event(remaining_inner_instructions, account_keys)?;
                                 all_actions.push(DecodedAction {
                                     instruction,
                                     event,
@@ -281,7 +281,9 @@ impl TransactionHandler for PumpFunLaunchpadHandler {
                 return false;
             }
 
-            if !is_invoke && log.contains("Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P invoke [") {
+            if !is_invoke
+                && log.contains("Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P invoke [")
+            {
                 is_invoke = true;
             }
 
@@ -292,7 +294,6 @@ impl TransactionHandler for PumpFunLaunchpadHandler {
                         "Create" | "Buy" | "Sell" | "Migrate" | "CollectCreatorFee"
                     ) {
                         is_interesting = true;
-
                     }
                 }
             }
@@ -316,7 +317,7 @@ impl TransactionHandler for PumpFunLaunchpadHandler {
 
         // Transaction Extras
         let priority_fee: f64 = get_priority_fee(tx);
-        let tip= get_tip(tx);
+        let tip = get_tip(tx);
         let mev_protection = get_mev_protection(tx, tip);
         let platform = get_trading_platform(tx);
 
@@ -328,8 +329,24 @@ impl TransactionHandler for PumpFunLaunchpadHandler {
                     if tx.error.is_some() {
                         // Transaction FAILED. Create a row with the available data.
                         let maker = tx.signers.get(0).cloned().unwrap_or_default();
-                        let pool_address = find_account_pubkey_in_instruction(&self.decoder.instruction_layouts, "buy", "bonding_curve", action.instruction_accounts, &tx.account_keys).map(|p| p.to_string()).unwrap_or_default();
-                        let base_address = find_account_pubkey_in_instruction(&self.decoder.instruction_layouts, "buy", "mint", action.instruction_accounts, &tx.account_keys).map(|p| p.to_string()).unwrap_or_default();
+                        let pool_address = find_account_pubkey_in_instruction(
+                            &self.decoder.instruction_layouts,
+                            "buy",
+                            "bonding_curve",
+                            action.instruction_accounts,
+                            &tx.account_keys,
+                        )
+                        .map(|p| p.to_string())
+                        .unwrap_or_default();
+                        let base_address = find_account_pubkey_in_instruction(
+                            &self.decoder.instruction_layouts,
+                            "buy",
+                            "mint",
+                            action.instruction_accounts,
+                            &tx.account_keys,
+                        )
+                        .map(|p| p.to_string())
+                        .unwrap_or_default();
 
                         let trade_row = TradeRow {
                             signature: tx.signature.to_string(),
@@ -352,10 +369,10 @@ impl TransactionHandler for PumpFunLaunchpadHandler {
                             pool_address,
                             base_address,
                             quote_address: constants::NATIVE_MINT.to_string(),
-                            slippage: 0.0, // Cannot be calculated on failure
+                            slippage: 0.0,     // Cannot be calculated on failure
                             price_impact: 0.0, // Cannot be calculated on failure
-                            base_amount: 0, // No tokens were transferred
-                            quote_amount: 0, // No SOL was transferred
+                            base_amount: 0,    // No tokens were transferred
+                            quote_amount: 0,   // No SOL was transferred
                             price: 0.0,
                             price_usd: 0.0,
                             total: 0.0,
@@ -371,13 +388,20 @@ impl TransactionHandler for PumpFunLaunchpadHandler {
                         let (_, post_quote) = get_asset_balances(tx, &maker_pk, &quote_address);
 
                         let pool_address = find_account_pubkey_in_instruction(
-                            &self.decoder.instruction_layouts, "buy", "bonding_curve",
-                            action.instruction_accounts, &tx.account_keys,
-                        ).map(|pk| pk.to_string()).unwrap_or_default();
+                            &self.decoder.instruction_layouts,
+                            "buy",
+                            "bonding_curve",
+                            action.instruction_accounts,
+                            &tx.account_keys,
+                        )
+                        .map(|pk| pk.to_string())
+                        .unwrap_or_default();
 
                         // --- START: DEFINITIVE SLIPPAGE & PRICE IMPACT FIX (BUY) ---
-                        let pre_trade_virtual_sol = e.virtual_sol_reserves.saturating_sub(e.sol_amount);
-                        let pre_trade_virtual_token = e.virtual_token_reserves.saturating_add(e.token_amount);
+                        let pre_trade_virtual_sol =
+                            e.virtual_sol_reserves.saturating_sub(e.sol_amount);
+                        let pre_trade_virtual_token =
+                            e.virtual_token_reserves.saturating_add(e.token_amount);
 
                         // 2. Calculate the "ideal cost" using the correct AMM formula and robust u128 math.
                         // This is what you would have paid for an infinitesimally small trade.
@@ -393,7 +417,8 @@ impl TransactionHandler for PumpFunLaunchpadHandler {
                         };
 
                         let slippage_tolerance = if ideal_cost_in_lamports > 0 {
-                            (args.max_sol_cost as f64 - ideal_cost_in_lamports as f64) / ideal_cost_in_lamports as f64
+                            (args.max_sol_cost as f64 - ideal_cost_in_lamports as f64)
+                                / ideal_cost_in_lamports as f64
                         } else {
                             0.0
                         };
@@ -402,15 +427,21 @@ impl TransactionHandler for PumpFunLaunchpadHandler {
                         // Compares the actual cost paid (from the event) to the ideal cost.
                         let price_impact = if ideal_cost_in_lamports > 0 {
                             // Formula: (Actual Cost - Ideal Cost) / Ideal Cost
-                            (e.sol_amount as f64 - ideal_cost_in_lamports as f64) / ideal_cost_in_lamports as f64
+                            (e.sol_amount as f64 - ideal_cost_in_lamports as f64)
+                                / ideal_cost_in_lamports as f64
                         } else {
                             0.0
                         };
 
-                        let base_decimals = tx.token_decimals.get(&base_address).cloned().unwrap_or(6);
+                        let base_decimals =
+                            tx.token_decimals.get(&base_address).cloned().unwrap_or(6);
 
                         let total = e.sol_amount as f64 / LAMPORTS_PER_SOL as f64;
-                        let price = if e.token_amount > 0 { total / (e.token_amount as f64 / 10f64.powi(base_decimals as i32)) } else { 0.0 };
+                        let price = if e.token_amount > 0 {
+                            total / (e.token_amount as f64 / 10f64.powi(base_decimals as i32))
+                        } else {
+                            0.0
+                        };
 
                         let trade_row = TradeRow {
                             signature: tx.signature.to_string(),
@@ -451,8 +482,24 @@ impl TransactionHandler for PumpFunLaunchpadHandler {
                     if tx.error.is_some() {
                         // Transaction FAILED. Create a row with the available data.
                         let maker = tx.signers.get(0).cloned().unwrap_or_default();
-                        let pool_address = find_account_pubkey_in_instruction(&self.decoder.instruction_layouts, "buy", "bonding_curve", action.instruction_accounts, &tx.account_keys).map(|p| p.to_string()).unwrap_or_default();
-                        let base_address = find_account_pubkey_in_instruction(&self.decoder.instruction_layouts, "buy", "mint", action.instruction_accounts, &tx.account_keys).map(|p| p.to_string()).unwrap_or_default();
+                        let pool_address = find_account_pubkey_in_instruction(
+                            &self.decoder.instruction_layouts,
+                            "buy",
+                            "bonding_curve",
+                            action.instruction_accounts,
+                            &tx.account_keys,
+                        )
+                        .map(|p| p.to_string())
+                        .unwrap_or_default();
+                        let base_address = find_account_pubkey_in_instruction(
+                            &self.decoder.instruction_layouts,
+                            "buy",
+                            "mint",
+                            action.instruction_accounts,
+                            &tx.account_keys,
+                        )
+                        .map(|p| p.to_string())
+                        .unwrap_or_default();
 
                         let trade_row = TradeRow {
                             signature: tx.signature.to_string(),
@@ -475,10 +522,10 @@ impl TransactionHandler for PumpFunLaunchpadHandler {
                             pool_address,
                             base_address,
                             quote_address: constants::NATIVE_MINT.to_string(),
-                            slippage: 0.0, // Cannot be calculated on failure
+                            slippage: 0.0,     // Cannot be calculated on failure
                             price_impact: 0.0, // Cannot be calculated on failure
-                            base_amount: 0, // No tokens were transferred
-                            quote_amount: 0, // No SOL was transferred
+                            base_amount: 0,    // No tokens were transferred
+                            quote_amount: 0,   // No SOL was transferred
                             price: 0.0,
                             price_usd: 0.0,
                             total: 0.0,
@@ -494,19 +541,26 @@ impl TransactionHandler for PumpFunLaunchpadHandler {
                         let (_, post_quote) = get_asset_balances(tx, &maker_pk, &quote_address);
 
                         let pool_address = find_account_pubkey_in_instruction(
-                            &self.decoder.instruction_layouts, "sell", "bonding_curve",
-                            action.instruction_accounts, &tx.account_keys,
-                        ).map(|pk| pk.to_string()).unwrap_or_default();
+                            &self.decoder.instruction_layouts,
+                            "sell",
+                            "bonding_curve",
+                            action.instruction_accounts,
+                            &tx.account_keys,
+                        )
+                        .map(|pk| pk.to_string())
+                        .unwrap_or_default();
 
-                        let pre_trade_virtual_sol = e.virtual_sol_reserves.saturating_add(e.sol_amount);
-                        let pre_trade_virtual_token = e.virtual_token_reserves.saturating_sub(e.token_amount);
+                        let pre_trade_virtual_sol =
+                            e.virtual_sol_reserves.saturating_add(e.sol_amount);
+                        let pre_trade_virtual_token =
+                            e.virtual_token_reserves.saturating_sub(e.token_amount);
 
                         // 2. Calculate the TRUE ideal SOL output using the standard AMM formula.
                         let ideal_sol_output = {
                             let sol_reserves = pre_trade_virtual_sol as u128;
                             let token_reserves = pre_trade_virtual_token as u128;
                             let tokens_to_sell = e.token_amount as u128;
-                            
+
                             if token_reserves > 0 {
                                 // Formula: (reserve_out * amount_in) / (reserve_in + amount_in)
                                 (sol_reserves * tokens_to_sell) / (token_reserves + tokens_to_sell)
@@ -518,7 +572,8 @@ impl TransactionHandler for PumpFunLaunchpadHandler {
                         // 3. Calculate Slippage Tolerance: Compares ideal output to the user's minimum.
                         let slippage_tolerance = if ideal_sol_output > 0 {
                             // Formula: (Ideal Output - Minimum Allowed) / Ideal Output
-                            (ideal_sol_output as f64 - args.min_sol_output as f64) / ideal_sol_output as f64
+                            (ideal_sol_output as f64 - args.min_sol_output as f64)
+                                / ideal_sol_output as f64
                         } else {
                             0.0
                         };
@@ -526,15 +581,21 @@ impl TransactionHandler for PumpFunLaunchpadHandler {
                         // 4. Calculate Price Impact: Compares ideal output to the actual amount received.
                         let price_impact = if ideal_sol_output > 0 {
                             // Formula: (Ideal Output - Actual Output) / Ideal Output
-                            (ideal_sol_output as f64 - e.sol_amount as f64) / ideal_sol_output as f64
+                            (ideal_sol_output as f64 - e.sol_amount as f64)
+                                / ideal_sol_output as f64
                         } else {
                             0.0
                         };
 
-                        let base_decimals = tx.token_decimals.get(&base_address).cloned().unwrap_or(6);
+                        let base_decimals =
+                            tx.token_decimals.get(&base_address).cloned().unwrap_or(6);
 
                         let total = e.sol_amount as f64 / LAMPORTS_PER_SOL as f64;
-                        let price = if e.token_amount > 0 { total / (e.token_amount as f64 / 10f64.powi(base_decimals as i32)) } else { 0.0 };
+                        let price = if e.token_amount > 0 {
+                            total / (e.token_amount as f64 / 10f64.powi(base_decimals as i32))
+                        } else {
+                            0.0
+                        };
 
                         let trade_row = TradeRow {
                             signature: tx.signature.to_string(),
@@ -567,30 +628,61 @@ impl TransactionHandler for PumpFunLaunchpadHandler {
                             total_usd: total * native_price_usd,
                         };
                         Some(EventType::Trade(trade_row))
-                    } else { None }
+                    } else {
+                        None
+                    }
                 }
                 DecodedInstruction::Create(args) => {
                     if tx.error.is_some() {
                         let mint_row = MintRow {
-                            signature: tx.signature.to_string(), timestamp: tx.block_time, slot: tx.slot, success: false, error: tx.error.clone(), priority_fee,
+                            signature: tx.signature.to_string(),
+                            timestamp: tx.block_time,
+                            slot: tx.slot,
+                            success: false,
+                            error: tx.error.clone(),
+                            priority_fee,
                             protocol: constants::PROTOCOL_PUMPFUN_LAUNCHPAD,
-                            mint_address: find_account_pubkey_in_instruction(&self.decoder.instruction_layouts, "create", "mint", action.instruction_accounts, &tx.account_keys).map(|p| p.to_string()).unwrap_or_default(),
+                            mint_address: find_account_pubkey_in_instruction(
+                                &self.decoder.instruction_layouts,
+                                "create",
+                                "mint",
+                                action.instruction_accounts,
+                                &tx.account_keys,
+                            )
+                            .map(|p| p.to_string())
+                            .unwrap_or_default(),
                             creator_address: tx.signers.get(0).cloned().unwrap_or_default(),
-                            pool_address: "".to_string(), initial_base_liquidity: 0, initial_quote_liquidity: 0,
-                            token_name: Some(args.name), token_symbol: Some(args.symbol), token_uri: Some(args.uri),
-                            token_decimals: 6, total_supply: 0, is_mutable: false,
-                            update_authority: None, mint_authority: None, freeze_authority: None,
+                            pool_address: "".to_string(),
+                            initial_base_liquidity: 0,
+                            initial_quote_liquidity: 0,
+                            token_name: Some(args.name),
+                            token_symbol: Some(args.symbol),
+                            token_uri: Some(args.uri),
+                            token_decimals: 6,
+                            total_supply: 0,
+                            is_mutable: false,
+                            update_authority: None,
+                            mint_authority: None,
+                            freeze_authority: None,
                         };
                         Some(EventType::Mint(mint_row))
                     } else if let Some(DecodedEvent::Create(e)) = action.event {
                         let mint_authority = find_account_pubkey_in_instruction(
-                                &self.decoder.instruction_layouts, "create", "mint_authority", 
-                                action.instruction_accounts, &tx.account_keys
-                            ).map(|pk| pk.to_string());
+                            &self.decoder.instruction_layouts,
+                            "create",
+                            "mint_authority",
+                            action.instruction_accounts,
+                            &tx.account_keys,
+                        )
+                        .map(|pk| pk.to_string());
 
                         let mint_pubkey_str = e.mint.to_string();
 
-                        let token_decimals = tx.token_decimals.get(&mint_pubkey_str).cloned().unwrap_or(6);
+                        let token_decimals = tx
+                            .token_decimals
+                            .get(&mint_pubkey_str)
+                            .cloned()
+                            .unwrap_or(6);
 
                         let mint_row = MintRow {
                             signature: tx.signature.to_string(),
@@ -604,19 +696,21 @@ impl TransactionHandler for PumpFunLaunchpadHandler {
                             creator_address: e.creator.to_string(),
                             pool_address: e.bonding_curve.to_string(),
                             initial_base_liquidity: e.virtual_token_reserves,
-                            initial_quote_liquidity: e.virtual_sol_reserves, 
+                            initial_quote_liquidity: e.virtual_sol_reserves,
                             token_name: Some(e.name),
                             token_symbol: Some(e.symbol),
                             token_uri: Some(e.uri),
                             token_decimals: token_decimals,
                             total_supply: e.token_total_supply,
-                            is_mutable: false, 
-                            update_authority: mint_authority, 
+                            is_mutable: false,
+                            update_authority: mint_authority,
                             mint_authority: None,
                             freeze_authority: None,
                         };
                         Some(EventType::Mint(mint_row))
-                    } else { None }
+                    } else {
+                        None
+                    }
                 }
                 DecodedInstruction::Migrate => {
                     if let Some(DecodedEvent::Migration(e)) = action.event {
@@ -635,27 +729,57 @@ impl TransactionHandler for PumpFunLaunchpadHandler {
                             migrated_quote_liquidity: Some(e.sol_amount),
                         };
                         Some(EventType::Migration(migration_row))
-                    } else { None }
+                    } else {
+                        None
+                    }
                 }
                 DecodedInstruction::CollectCreatorFee => {
                     if tx.error.is_some() {
                         let fee_row = FeeCollectionRow {
-                            signature: tx.signature.to_string(), timestamp: tx.block_time, slot: tx.slot, success: false, error: tx.error.clone(),
-                            priority_fee, protocol: constants::PROTOCOL_PUMPFUN_LAUNCHPAD,
-                            vault_address: find_account_pubkey_in_instruction(&self.decoder.instruction_layouts, "collect_creator_fee", "creator_vault", action.instruction_accounts, &tx.account_keys).map(|p| p.to_string()).unwrap_or_default(),
-                            recipient_address: find_account_pubkey_in_instruction(&self.decoder.instruction_layouts, "collect_creator_fee", "creator", action.instruction_accounts, &tx.account_keys).map(|p| p.to_string()).unwrap_or_default(),
-                            token_0_mint_address: constants::NATIVE_MINT.to_string(), token_0_amount: 0.0,
-                            token_1_mint_address: None, token_1_amount: None,
+                            signature: tx.signature.to_string(),
+                            timestamp: tx.block_time,
+                            slot: tx.slot,
+                            success: false,
+                            error: tx.error.clone(),
+                            priority_fee,
+                            protocol: constants::PROTOCOL_PUMPFUN_LAUNCHPAD,
+                            vault_address: find_account_pubkey_in_instruction(
+                                &self.decoder.instruction_layouts,
+                                "collect_creator_fee",
+                                "creator_vault",
+                                action.instruction_accounts,
+                                &tx.account_keys,
+                            )
+                            .map(|p| p.to_string())
+                            .unwrap_or_default(),
+                            recipient_address: find_account_pubkey_in_instruction(
+                                &self.decoder.instruction_layouts,
+                                "collect_creator_fee",
+                                "creator",
+                                action.instruction_accounts,
+                                &tx.account_keys,
+                            )
+                            .map(|p| p.to_string())
+                            .unwrap_or_default(),
+                            token_0_mint_address: constants::NATIVE_MINT.to_string(),
+                            token_0_amount: 0.0,
+                            token_1_mint_address: None,
+                            token_1_amount: None,
                         };
                         Some(EventType::FeeCollection(fee_row))
                     } else if let Some(DecodedEvent::CreatorFee(e)) = action.event {
                         let pool_address = find_account_pubkey_in_instruction(
-                            &self.decoder.instruction_layouts, "collect_creator_fee", "creator_vault", 
-                            action.instruction_accounts, &tx.account_keys
-                        ).map(|pk| pk.to_string()).unwrap_or_default();
+                            &self.decoder.instruction_layouts,
+                            "collect_creator_fee",
+                            "creator_vault",
+                            action.instruction_accounts,
+                            &tx.account_keys,
+                        )
+                        .map(|pk| pk.to_string())
+                        .unwrap_or_default();
 
                         let claimed_amount = e.creator_fee as f64 / LAMPORTS_PER_SOL as f64;
-                        
+
                         let fee_row = FeeCollectionRow {
                             signature: tx.signature.to_string(),
                             timestamp: tx.block_time,
@@ -672,7 +796,9 @@ impl TransactionHandler for PumpFunLaunchpadHandler {
                             token_1_amount: None,
                         };
                         Some(EventType::FeeCollection(fee_row))
-                    } else { None }
+                    } else {
+                        None
+                    }
                 }
             };
 

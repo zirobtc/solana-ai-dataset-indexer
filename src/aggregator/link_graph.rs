@@ -1,29 +1,33 @@
 use crate::aggregator::graph_schema::{
-    BundleTradeLink, BurnedLink, CoordinatedActivityLink, CopiedTradeLink, LockedSupplyLink, MintedLink, ProvidedLiquidityLink, SnipedLink, TopTraderOfLink, TransferLink, WhaleOfLink
+    BundleTradeLink, BurnedLink, CoordinatedActivityLink, CopiedTradeLink, LockedSupplyLink,
+    MintedLink, ProvidedLiquidityLink, SnipedLink, TopTraderOfLink, TransferLink, WhaleOfLink,
+};
+use crate::handlers::constants::{
+    NATIVE_MINT, PROTOCOL_PUMPFUN_LAUNCHPAD, USD1_MINT, USDC_MINT, USDT_MINT,
 };
 use crate::types::{
-    BurnRow, EventPayload, EventType, LiquidityRow, MintRow, SupplyLockRow, TradeRow, TransferRow
+    BurnRow, EventPayload, EventType, LiquidityRow, MintRow, SupplyLockRow, TradeRow, TransferRow,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
+use chrono::Utc;
 use clickhouse::{Client, Row};
 use futures::stream::{self, StreamExt};
 use itertools::Itertools;
-use neo4rs::{query, BoltType, Graph};
-use redis::streams::{StreamReadOptions, StreamReadReply};
+use neo4rs::{BoltType, Graph, query};
+use once_cell::sync::Lazy;
 use redis::FromRedisValue;
-use redis::{aio::MultiplexedConnection, AsyncCommands, Client as RedisClient};
-use crate::handlers::constants::{NATIVE_MINT, USDC_MINT, USDT_MINT, USD1_MINT, PROTOCOL_PUMPFUN_LAUNCHPAD};
+use redis::streams::{StreamReadOptions, StreamReadReply};
+use redis::{AsyncCommands, Client as RedisClient, aio::MultiplexedConnection};
 use serde::Deserialize;
 use solana_sdk::native_token::LAMPORTS_PER_SOL;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::Instant;
-use chrono::Utc;
-use once_cell::sync::Lazy;
-use tokio::time::sleep;
 use tokio::sync::Mutex;
+use tokio::time::Instant;
+use tokio::time::sleep;
+use tokio::try_join;
 
 fn decimals_for_quote(mint: &str) -> u8 {
     if mint == NATIVE_MINT {
@@ -88,7 +92,6 @@ fn env_parse<T: FromStr>(key: &str, default: T) -> T {
         .unwrap_or(default)
 }
 
-
 #[derive(Row, Clone, Debug, Deserialize)]
 struct HistoricalTrade {
     signature: String,
@@ -98,13 +101,10 @@ struct HistoricalTrade {
     slippage: f32,
 }
 
-
-
 enum FollowerLink {
     Copied(CopiedTradeLink),
     Coordinated(CoordinatedActivityLink),
 }
-
 
 pub struct LinkGraph {
     db_client: Client,
@@ -113,9 +113,13 @@ pub struct LinkGraph {
 }
 
 #[derive(Row, Deserialize, Debug)]
-struct Ping { alive: u8 }
+struct Ping {
+    alive: u8,
+}
 #[derive(Row, Deserialize, Debug)]
-struct CountResult { count: u64 }
+struct CountResult {
+    count: u64,
+}
 
 impl LinkGraph {
     pub async fn new(
@@ -127,7 +131,11 @@ impl LinkGraph {
         neo4j_client.run(query("MATCH (n) RETURN count(n)")).await?;
         let redis_conn = redis_client.get_multiplexed_async_connection().await?;
         println!("[WalletGraph] ✔️ Connected to ClickHouse, Neo4j, and Redis.");
-        Ok(Self { db_client, neo4j_client, redis_conn })
+        Ok(Self {
+            db_client,
+            neo4j_client,
+            redis_conn,
+        })
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -135,30 +143,43 @@ impl LinkGraph {
         let group_name = "link_graph_analyzers";
         let consumer_name = format!("consumer-{}", uuid::Uuid::new_v4());
 
-        let result: redis::RedisResult<()> = self.redis_conn.xgroup_create_mkstream(stream_key, group_name, "0").await;
-        
+        let result: redis::RedisResult<()> = self
+            .redis_conn
+            .xgroup_create_mkstream(stream_key, group_name, "0")
+            .await;
+
         if let Err(e) = result {
             if !e.to_string().contains("BUSYGROUP") {
-                return Err(anyhow!("Failed to create or connect to consumer group: {}", e));
+                return Err(anyhow!(
+                    "Failed to create or connect to consumer group: {}",
+                    e
+                ));
             }
-            println!("[LinkGraph] Consumer group '{}' already exists. Resuming.", group_name);
+            println!(
+                "[LinkGraph] Consumer group '{}' already exists. Resuming.",
+                group_name
+            );
         } else {
-            println!("[LinkGraph] Created new consumer group '{}' on stream '{}'.", group_name, stream_key);
+            println!(
+                "[LinkGraph] Created new consumer group '{}' on stream '{}'.",
+                group_name, stream_key
+            );
         }
 
         let mut message_buffer: Vec<(String, EventPayload)> = Vec::new();
         let cfg = &*LINK_GRAPH_CONFIG;
 
         loop {
-
-
             let queue_len: i64 = self.redis_conn.xlen(stream_key).await.unwrap_or(0);
             if queue_len < cfg.queue_threshold {
-                println!("[LinkGraph] Queue size ({}) is below threshold ({}). Waiting...", queue_len, cfg.queue_threshold);
+                println!(
+                    "[LinkGraph] Queue size ({}) is below threshold ({}). Waiting...",
+                    queue_len, cfg.queue_threshold
+                );
                 tokio::time::sleep(Duration::from_secs(15)).await;
                 continue;
             }
-            
+
             // --- CORRECTED COLLECTION PHASE ---
             loop {
                 // First, check if the buffer we already have contains a full window.
@@ -172,10 +193,16 @@ impl LinkGraph {
                         break;
                     }
                 }
-                
+
                 // If the window is not yet full, fetch more messages.
-                let new_messages = collect_events_from_stream(&self.redis_conn, stream_key, group_name, &consumer_name).await?;
-                
+                let new_messages = collect_events_from_stream(
+                    &self.redis_conn,
+                    stream_key,
+                    group_name,
+                    &consumer_name,
+                )
+                .await?;
+
                 // =========================================================================
                 // >> THE CRITICAL FIX <<
                 // If Redis returns nothing, we DON'T break. We just loop again,
@@ -185,7 +212,8 @@ impl LinkGraph {
                 if new_messages.is_empty() {
                     // If the stream is truly empty and our buffer is still not full,
                     // it means we've reached the end of the data stream. We should process what we have.
-                    if queue_len < cfg.redis_drain_threshold { // Check against the Redis read size
+                    if queue_len < cfg.redis_drain_threshold {
+                        // Check against the Redis read size
                         println!("[LinkGraph] Stream is draining. Processing final partial batch.");
                         break;
                     }
@@ -193,23 +221,25 @@ impl LinkGraph {
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     continue;
                 }
-                
+
                 message_buffer.extend(new_messages);
             }
 
             if message_buffer.is_empty() {
                 continue;
             }
-            
+
             // --- PARTITIONING PHASE ---
             message_buffer.sort_by_key(|(_, p)| p.timestamp);
             let window_start_ts = message_buffer.first().unwrap().1.timestamp;
-            
-            let split_index = message_buffer.partition_point(|(_, p)| p.timestamp < window_start_ts + cfg.time_window_seconds);
-            
+
+            let split_index = message_buffer
+                .partition_point(|(_, p)| p.timestamp < window_start_ts + cfg.time_window_seconds);
+
             let messages_to_process = message_buffer.drain(..split_index).collect::<Vec<_>>();
-            let (window_message_ids, window_payloads): (Vec<_>, Vec<_>) = messages_to_process.into_iter().unzip();
-            
+            let (window_message_ids, window_payloads): (Vec<_>, Vec<_>) =
+                messages_to_process.into_iter().unzip();
+
             // --- PROCESSING PHASE ---
             let payload_count = window_payloads.len();
             if payload_count == 0 {
@@ -218,10 +248,17 @@ impl LinkGraph {
 
             let first_ts = window_payloads.first().map_or(0, |p| p.timestamp);
             let last_ts = window_payloads.last().map_or(0, |p| p.timestamp);
-            let on_chain_duration_secs = if last_ts > first_ts { last_ts - first_ts } else { 0 };
+            let on_chain_duration_secs = if last_ts > first_ts {
+                last_ts - first_ts
+            } else {
+                0
+            };
 
             let batch_start_time = Instant::now();
-            println!("[LinkGraph] ⚙️ Processing window of {} events (covering {}s on-chain)...", payload_count, on_chain_duration_secs);
+            println!(
+                "[LinkGraph] ⚙️ Processing window of {} events (covering {}s on-chain)...",
+                payload_count, on_chain_duration_secs
+            );
 
             let mut attempts = 0;
             let max_retries = 3;
@@ -229,10 +266,17 @@ impl LinkGraph {
             while attempts <= max_retries {
                 match self.process_batch(window_payloads.clone()).await {
                     Ok(_) => {
-                        let result: redis::RedisResult<i64> = self.redis_conn.xack(stream_key, group_name, &window_message_ids).await;
+                        let result: redis::RedisResult<i64> = self
+                            .redis_conn
+                            .xack(stream_key, group_name, &window_message_ids)
+                            .await;
                         if let Err(e) = result {
                             eprintln!("[LinkGraph] 🔴 FAILED to acknowledge messages: {}", e);
-                        } else if let Err(e) = self.redis_conn.xdel::<_, _, i64>(stream_key, &window_message_ids).await {
+                        } else if let Err(e) = self
+                            .redis_conn
+                            .xdel::<_, _, i64>(stream_key, &window_message_ids)
+                            .await
+                        {
                             eprintln!("[LinkGraph] 🔴 FAILED to delete messages: {}", e);
                         }
                         handled = true;
@@ -243,36 +287,68 @@ impl LinkGraph {
                         if err_str.contains("DeadlockDetected") && attempts < max_retries {
                             attempts += 1;
                             let backoff_ms = 200 * attempts;
-                            eprintln!("[LinkGraph] ⚠️ Deadlock detected, retrying {}/{} after {}ms", attempts, max_retries, backoff_ms);
+                            eprintln!(
+                                "[LinkGraph] ⚠️ Deadlock detected, retrying {}/{} after {}ms",
+                                attempts, max_retries, backoff_ms
+                            );
                             sleep(Duration::from_millis(backoff_ms as u64)).await;
                             continue;
                         } else {
-                            eprintln!("[LinkGraph] ❌ Failed to process batch (no ACK). Error: {}", err_str);
+                            eprintln!(
+                                "[LinkGraph] ❌ Failed to process batch (no ACK). Error: {}",
+                                err_str
+                            );
                             // Attempt to move to DLQ to avoid blocking the stream.
                             let mut conn = self.redis_conn.clone();
                             let mut dlq_ok = true;
                             for payload in window_payloads.iter() {
                                 match bincode::serialize(payload) {
                                     Ok(data) => {
-                                        if let Err(dlq_err) = conn.xadd::<_, _, _, _, ()>(&*LINK_GRAPH_DLQ_STREAM, "*", &[("payload", data)]).await {
-                                            eprintln!("[LinkGraph] 🔴 Failed to write to DLQ: {}", dlq_err);
+                                        if let Err(dlq_err) = conn
+                                            .xadd::<_, _, _, _, ()>(
+                                                &*LINK_GRAPH_DLQ_STREAM,
+                                                "*",
+                                                &[("payload", data)],
+                                            )
+                                            .await
+                                        {
+                                            eprintln!(
+                                                "[LinkGraph] 🔴 Failed to write to DLQ: {}",
+                                                dlq_err
+                                            );
                                             dlq_ok = false;
                                             break;
                                         }
                                     }
                                     Err(se) => {
-                                        eprintln!("[LinkGraph] 🔴 Failed to serialize payload for DLQ: {}", se);
+                                        eprintln!(
+                                            "[LinkGraph] 🔴 Failed to serialize payload for DLQ: {}",
+                                            se
+                                        );
                                         dlq_ok = false;
                                         break;
                                     }
                                 }
                             }
                             if dlq_ok {
-                                let result: redis::RedisResult<i64> = self.redis_conn.xack(stream_key, group_name, &window_message_ids).await;
+                                let result: redis::RedisResult<i64> = self
+                                    .redis_conn
+                                    .xack(stream_key, group_name, &window_message_ids)
+                                    .await;
                                 if let Err(e) = result {
-                                    eprintln!("[LinkGraph] 🔴 FAILED to acknowledge messages after DLQ: {}", e);
-                                } else if let Err(e) = self.redis_conn.xdel::<_, _, i64>(stream_key, &window_message_ids).await {
-                                    eprintln!("[LinkGraph] 🔴 FAILED to delete messages after DLQ: {}", e);
+                                    eprintln!(
+                                        "[LinkGraph] 🔴 FAILED to acknowledge messages after DLQ: {}",
+                                        e
+                                    );
+                                } else if let Err(e) = self
+                                    .redis_conn
+                                    .xdel::<_, _, i64>(stream_key, &window_message_ids)
+                                    .await
+                                {
+                                    eprintln!(
+                                        "[LinkGraph] 🔴 FAILED to delete messages after DLQ: {}",
+                                        e
+                                    );
                                 }
                                 handled = true;
                             }
@@ -284,11 +360,14 @@ impl LinkGraph {
             if !handled {
                 eprintln!("[LinkGraph] ⚠️ Batch left pending due to repeated failures.");
             }
-            
+
             let elapsed_secs = batch_start_time.elapsed().as_secs_f64();
             if elapsed_secs > 0.0 {
                 let eps = payload_count as f64 / elapsed_secs;
-                println!("[LinkGraph] ⏱️ Batch processed in {:.2}s ({:.2} events/sec).", elapsed_secs, eps);
+                println!(
+                    "[LinkGraph] ⏱️ Batch processed in {:.2}s ({:.2} events/sec).",
+                    elapsed_secs, eps
+                );
             }
         }
     }
@@ -336,7 +415,8 @@ impl LinkGraph {
                     burns.push(burn.clone());
                 }
                 EventType::Liquidity(liquidity) => {
-                    if liquidity.change_type == 0 { // 0 = Add Liquidity
+                    if liquidity.change_type == 0 {
+                        // 0 = Add Liquidity
                         unique_wallets.insert(liquidity.lp_provider.clone());
                         liquidity_events.push(liquidity.clone());
                     }
@@ -345,17 +425,20 @@ impl LinkGraph {
             }
         }
 
-        // --- DEADLOCK FIX: Run link detection sequentially ---
-        let sequential_start = Instant::now();
-
-        self.process_mints(&mints, &trades).await?;
-        self.process_transfers_and_funding(&transfers).await?;
-        self.process_supply_locks(&supply_locks).await?;
-        self.process_burns(&burns).await?;
-        self.process_liquidity_events(&liquidity_events).await?;
-        self.process_trade_patterns(&trades, &mints).await?; // This is the most complex, run it last.
-
-        println!("[LinkGraph] [TimeWindow] Sequential link processing finished in: {:?}", sequential_start.elapsed());
+        // Run link detection in parallel; writes remain serialized by the global Neo4j lock.
+        let parallel_start = Instant::now();
+        try_join!(
+            self.process_mints(&mints, &trades),
+            self.process_transfers_and_funding(&transfers),
+            self.process_supply_locks(&supply_locks),
+            self.process_burns(&burns),
+            self.process_liquidity_events(&liquidity_events),
+            self.process_trade_patterns(&trades, &mints),
+        )?;
+        println!(
+            "[LinkGraph] [TimeWindow] Parallel link processing finished in: {:?}",
+            parallel_start.elapsed()
+        );
         Ok(())
     }
 
@@ -366,24 +449,35 @@ impl LinkGraph {
 
         // Payloads are already a complete time-window. We just need to sort them.
         payloads.sort_by_key(|p| p.timestamp);
-        
+
         // Process the entire batch as a single logical unit.
         self.process_time_window(&payloads).await?;
-        
-        println!("[LinkGraph] Finished processing batch of {} events.", payloads.len());
+
+        println!(
+            "[LinkGraph] Finished processing batch of {} events.",
+            payloads.len()
+        );
         Ok(())
     }
 
     // --- Main Logic for Pattern Detection ---
-    async fn process_mints(&self, mints: &[MintRow], all_trades_in_batch: &[TradeRow]) -> Result<()> {
-        if mints.is_empty() { return Ok(()); }
+    async fn process_mints(
+        &self,
+        mints: &[MintRow],
+        all_trades_in_batch: &[TradeRow],
+    ) -> Result<()> {
+        if mints.is_empty() {
+            return Ok(());
+        }
         let mut links = Vec::new();
 
         for mint in mints {
-            let dev_buy = all_trades_in_batch.iter().find(|t|
-                t.maker == mint.creator_address &&
-                t.base_address == mint.mint_address &&
-                t.trade_type == 0 // 0 = Buy
+            let dev_buy = all_trades_in_batch.iter().find(
+                |t| {
+                    t.maker == mint.creator_address
+                        && t.base_address == mint.mint_address
+                        && t.trade_type == 0
+                }, // 0 = Buy
             );
             let buy_amount_decimals = dev_buy.map_or(0.0, |t| {
                 let quote_decimals = decimals_for_quote(&t.quote_address);
@@ -400,64 +494,84 @@ impl LinkGraph {
     }
 
     async fn process_supply_locks(&self, locks: &[SupplyLockRow]) -> Result<()> {
-        if locks.is_empty() { return Ok(()); }
-        let links: Vec<_> = locks.iter().map(|l| LockedSupplyLink {
-            signature: l.signature.clone(),
-            amount: l.total_locked_amount as f64,
-            timestamp: l.timestamp as i64,
-            unlock_timestamp: l.final_unlock_timestamp,
-        }).collect();
+        if locks.is_empty() {
+            return Ok(());
+        }
+        let links: Vec<_> = locks
+            .iter()
+            .map(|l| LockedSupplyLink {
+                signature: l.signature.clone(),
+                amount: l.total_locked_amount as f64,
+                timestamp: l.timestamp as i64,
+                unlock_timestamp: l.final_unlock_timestamp,
+            })
+            .collect();
         self.write_locked_supply_links(&links, locks).await?;
         Ok(())
     }
 
-    
     async fn process_burns(&self, burns: &[BurnRow]) -> Result<()> {
-        if burns.is_empty() { return Ok(()); }
-        let links: Vec<_> = burns.iter().map(|b| BurnedLink {
-            signature: b.signature.clone(),
-            amount: b.amount_decimal,
-            timestamp: b.timestamp as i64,
-        }).collect();
+        if burns.is_empty() {
+            return Ok(());
+        }
+        let links: Vec<_> = burns
+            .iter()
+            .map(|b| BurnedLink {
+                signature: b.signature.clone(),
+                amount: b.amount_decimal,
+                timestamp: b.timestamp as i64,
+            })
+            .collect();
         self.write_burned_links(&links, burns).await?;
         Ok(())
     }
 
     async fn process_transfers_and_funding(&self, transfers: &[TransferRow]) -> Result<()> {
-        if transfers.is_empty() { return Ok(()); }
+        if transfers.is_empty() {
+            return Ok(());
+        }
 
         // Directly map every TransferRow to a TransferLink without any extra logic.
-        let transfer_links: Vec<TransferLink> = transfers.iter().map(|transfer| {
-            TransferLink {
+        let transfer_links: Vec<TransferLink> = transfers
+            .iter()
+            .map(|transfer| TransferLink {
                 source: transfer.source.clone(),
                 destination: transfer.destination.clone(),
                 signature: transfer.signature.clone(),
                 mint: transfer.mint_address.clone(),
                 timestamp: transfer.timestamp as i64,
                 amount: transfer.amount_decimal,
-            }
-        }).collect();
+            })
+            .collect();
 
         self.write_transfer_links(&transfer_links).await?;
         Ok(())
     }
 
-    async fn process_trade_patterns(&self, trades: &[TradeRow], mints_in_batch: &[MintRow]) -> Result<()> {
-        if trades.is_empty() { return Ok(()); }
-        
+    async fn process_trade_patterns(
+        &self,
+        trades: &[TradeRow],
+        mints_in_batch: &[MintRow],
+    ) -> Result<()> {
+        if trades.is_empty() {
+            return Ok(());
+        }
+
         let creator_map: HashMap<String, String> = mints_in_batch
             .iter()
             .map(|m| (m.mint_address.clone(), m.creator_address.clone()))
             .collect();
-        
+
         let mut processed_pairs = HashSet::new();
-        
+
         let bundle_links = self.detect_bundle_trades(trades, &mut processed_pairs);
-        if !bundle_links.is_empty() { 
-            self.write_bundle_trade_links(&bundle_links).await?; 
+        if !bundle_links.is_empty() {
+            self.write_bundle_trade_links(&bundle_links).await?;
         }
-        
-        let follower_links = self.detect_follower_activity(trades, &mut processed_pairs).await?;
+
+        let follower_links = self
+            .detect_follower_activity(trades, &mut processed_pairs)
+            .await?;
         if !follower_links.is_empty() {
             let mut copied_links = Vec::new();
             let mut coordinated_links = Vec::new();
@@ -467,29 +581,44 @@ impl LinkGraph {
                     FollowerLink::Coordinated(l) => coordinated_links.push(l),
                 }
             }
-            if !copied_links.is_empty() { self.write_copied_trade_links(&copied_links).await?; }
-            if !coordinated_links.is_empty() { self.write_coordinated_activity_links(&coordinated_links).await?; }
+            if !copied_links.is_empty() {
+                self.write_copied_trade_links(&copied_links).await?;
+            }
+            if !coordinated_links.is_empty() {
+                self.write_coordinated_activity_links(&coordinated_links)
+                    .await?;
+            }
         }
-        
+
         self.detect_and_write_snipes(trades, creator_map).await?;
         self.detect_and_write_whale_links(trades).await?;
         self.detect_and_write_top_trader_links(trades).await?;
-        
+
         Ok(())
     }
 
-    async fn detect_and_write_snipes(&self, _trades: &[TradeRow], creator_map: HashMap<String, String>) -> Result<()> {
+    async fn detect_and_write_snipes(
+        &self,
+        _trades: &[TradeRow],
+        creator_map: HashMap<String, String>,
+    ) -> Result<()> {
         let cfg = &*LINK_GRAPH_CONFIG;
         let mut links: Vec<SnipedLink> = Vec::new();
-        let mut snipers_map: HashMap<String, (String, String)> = HashMap::new(); 
+        let mut snipers_map: HashMap<String, (String, String)> = HashMap::new();
         // Limit sniper detection to Pump.fun launchpad trades only.
-        let pump_trades: Vec<&TradeRow> = _trades.iter()
+        let pump_trades: Vec<&TradeRow> = _trades
+            .iter()
             .filter(|t| t.protocol == PROTOCOL_PUMPFUN_LAUNCHPAD)
             .collect();
-        if pump_trades.is_empty() { return Ok(()); }
+        if pump_trades.is_empty() {
+            return Ok(());
+        }
 
-        let unique_mints: HashSet<String> = pump_trades.iter().map(|t| t.base_address.clone()).collect();
-        if unique_mints.is_empty() { return Ok(()); }
+        let unique_mints: HashSet<String> =
+            pump_trades.iter().map(|t| t.base_address.clone()).collect();
+        if unique_mints.is_empty() {
+            return Ok(());
+        }
 
         // This pre-flight check remains the same
         #[derive(Row, Deserialize, Debug)]
@@ -508,14 +637,20 @@ impl LinkGraph {
         let unique_mints_vec: Vec<_> = unique_mints.iter().cloned().collect();
 
         for chunk in unique_mints_vec.chunks(cfg.chunk_size_large) {
-            let mut chunk_results = self.db_client.query(holder_check_query)
+            let mut chunk_results = self
+                .db_client
+                .query(holder_check_query)
                 .bind(chunk) // Bind the smaller chunk
-                .fetch_all().await
+                .fetch_all()
+                .await
                 .map_err(|e| anyhow!("DB ERROR in Snipes-HolderCheck chunk: {}", e))?;
             holder_infos.append(&mut chunk_results);
         }
 
-        let token_holder_map: HashMap<String, u32> = holder_infos.into_iter().map(|t| (t.token_address, t.unique_holders)).collect();
+        let token_holder_map: HashMap<String, u32> = holder_infos
+            .into_iter()
+            .map(|t| (t.token_address, t.unique_holders))
+            .collect();
 
         #[derive(Row, Deserialize, Clone, Debug)]
         struct SniperInfo {
@@ -524,14 +659,15 @@ impl LinkGraph {
             first_total: f64,
             first_ts: u32,
         }
-        
+
         #[derive(Row, Deserialize, Debug)]
-        struct TokenCreator { 
-            creator_address: String 
+        struct TokenCreator {
+            creator_address: String,
         }
 
         // OPTIMIZATION: Parallelize the database queries for each mint.
-        let query_futures = unique_mints.into_iter()
+        let query_futures = unique_mints
+            .into_iter()
             .filter(|mint| {
                 // Pre-filter mints that are too established
                 let holder_count = token_holder_map.get(mint).cloned().unwrap_or(0);
@@ -542,7 +678,6 @@ impl LinkGraph {
                 let creator_map_clone = creator_map.clone();
                 // Create an async block (a future) for each query
                 async move {
-
                     let snipers_query = "
                         SELECT maker,
                                argMin(signature, timestamp) as first_sig,
@@ -552,11 +687,19 @@ impl LinkGraph {
                         GROUP BY maker ORDER BY min(timestamp) ASC LIMIT ?
                     ";
 
-                    let result = db_client.query(snipers_query)
+                    let result = db_client
+                        .query(snipers_query)
                         .bind(mint.clone()) // Keep this bind
                         .bind(cfg.sniper_rank_threshold) // And this one
-                        .fetch_all::<SniperInfo>().await
-                        .map_err(|e| anyhow!("[SNIPER_FAIL]: Sniper fetch for mint '{}' failed. Error: {}", mint, e));
+                        .fetch_all::<SniperInfo>()
+                        .await
+                        .map_err(|e| {
+                            anyhow!(
+                                "[SNIPER_FAIL]: Sniper fetch for mint '{}' failed. Error: {}",
+                                mint,
+                                e
+                            )
+                        });
 
                     (mint, result)
                 }
@@ -579,7 +722,10 @@ impl LinkGraph {
                             rank: (i + 1) as i64,
                             sniped_amount: sniper.first_total,
                         });
-                        snipers_map.insert(sniper.first_sig.clone(), (sniper.maker.clone(), mint.clone()));
+                        snipers_map.insert(
+                            sniper.first_sig.clone(),
+                            (sniper.maker.clone(), mint.clone()),
+                        );
                     }
                 }
                 Err(e) => eprintln!("[Snipers] Error processing mint {}: {}", mint, e),
@@ -592,12 +738,19 @@ impl LinkGraph {
         Ok(())
     }
 
-    fn detect_bundle_trades(&self, trades: &[TradeRow], processed_pairs: &mut HashSet<(String, String)>) -> Vec<BundleTradeLink> {
+    fn detect_bundle_trades(
+        &self,
+        trades: &[TradeRow],
+        processed_pairs: &mut HashSet<(String, String)>,
+    ) -> Vec<BundleTradeLink> {
         let mut links = Vec::new();
-        let trades_by_slot_mint = trades.iter().into_group_map_by(|t| (t.slot, t.base_address.clone()));
+        let trades_by_slot_mint = trades
+            .iter()
+            .into_group_map_by(|t| (t.slot, t.base_address.clone()));
 
         for ((slot, mint), trades_in_bundle) in trades_by_slot_mint {
-            let unique_makers: Vec<_> = trades_in_bundle.iter().map(|t| &t.maker).unique().collect();
+            let unique_makers: Vec<_> =
+                trades_in_bundle.iter().map(|t| &t.maker).unique().collect();
             if unique_makers.len() <= 1 {
                 continue;
             }
@@ -615,11 +768,17 @@ impl LinkGraph {
             };
             let leader_wallet = &leader_trade.maker;
 
-            let all_bundle_signatures: Vec<String> = trades_in_bundle.iter().map(|t| t.signature.clone()).collect();
-            
-            for follower_trade in trades_in_bundle.iter().filter(|t| &t.maker != leader_wallet) {
+            let all_bundle_signatures: Vec<String> = trades_in_bundle
+                .iter()
+                .map(|t| t.signature.clone())
+                .collect();
+
+            for follower_trade in trades_in_bundle
+                .iter()
+                .filter(|t| &t.maker != leader_wallet)
+            {
                 let follower_wallet = &follower_trade.maker;
-                
+
                 let mut combo_sorted = vec![leader_wallet.clone(), follower_wallet.clone()];
                 combo_sorted.sort();
                 let pair_key = (combo_sorted[0].clone(), combo_sorted[1].clone());
@@ -649,7 +808,8 @@ impl LinkGraph {
         let mut links = Vec::new();
         let min_usd_value = cfg.min_trade_total_usd;
 
-        let significant_trades: Vec<&TradeRow> = trades.iter()
+        let significant_trades: Vec<&TradeRow> = trades
+            .iter()
             .filter(|t| t.total_usd >= min_usd_value)
             .collect();
 
@@ -657,7 +817,8 @@ impl LinkGraph {
             return Ok(links);
         }
 
-        let unique_pairs: Vec<(String, String)> = significant_trades.iter()
+        let unique_pairs: Vec<(String, String)> = significant_trades
+            .iter()
             .map(|t| (t.maker.clone(), t.base_address.clone()))
             .unique()
             .collect();
@@ -673,7 +834,8 @@ impl LinkGraph {
             slippage: f32,
         }
 
-        let mut historical_trades_map: HashMap<(String, String), Vec<FullHistTrade>> = HashMap::new();
+        let mut historical_trades_map: HashMap<(String, String), Vec<FullHistTrade>> =
+            HashMap::new();
 
         if !unique_pairs.is_empty() {
             let historical_query = "
@@ -682,10 +844,18 @@ impl LinkGraph {
                 WHERE (maker, base_address) IN ?
             ";
             for chunk in unique_pairs.chunks(cfg.chunk_size_historical) {
-                let chunk_results: Vec<FullHistTrade> = self.db_client.query(historical_query)
+                let chunk_results: Vec<FullHistTrade> = self
+                    .db_client
+                    .query(historical_query)
                     .bind(chunk)
-                    .fetch_all().await
-                    .map_err(|e| anyhow!("[FOLLOWER_FAIL]: Historical trade fetch failed. Error: {}", e))?;
+                    .fetch_all()
+                    .await
+                    .map_err(|e| {
+                        anyhow!(
+                            "[FOLLOWER_FAIL]: Historical trade fetch failed. Error: {}",
+                            e
+                        )
+                    })?;
 
                 for trade in chunk_results {
                     historical_trades_map
@@ -696,12 +866,18 @@ impl LinkGraph {
             }
         }
 
-        let trades_by_mint = significant_trades.into_iter().into_group_map_by(|t| t.base_address.clone());
+        let trades_by_mint = significant_trades
+            .into_iter()
+            .into_group_map_by(|t| t.base_address.clone());
 
         for (mint, trades_in_batch) in trades_by_mint {
-            if trades_in_batch.len() < 2 { continue; }
+            if trades_in_batch.len() < 2 {
+                continue;
+            }
 
-            let Some(leader_trade) = trades_in_batch.iter().min_by_key(|t| t.timestamp) else { continue };
+            let Some(leader_trade) = trades_in_batch.iter().min_by_key(|t| t.timestamp) else {
+                continue;
+            };
             let leader_wallet = &leader_trade.maker;
 
             for follower_trade in trades_in_batch.iter().filter(|t| &t.maker != leader_wallet) {
@@ -714,8 +890,10 @@ impl LinkGraph {
                     continue;
                 }
 
-                if let (Some(leader_hist_ref), Some(follower_hist_ref)) = (historical_trades_map.get(&(leader_wallet.clone(), mint.clone())), historical_trades_map.get(&(follower_wallet.clone(), mint.clone()))) {
-                    
+                if let (Some(leader_hist_ref), Some(follower_hist_ref)) = (
+                    historical_trades_map.get(&(leader_wallet.clone(), mint.clone())),
+                    historical_trades_map.get(&(follower_wallet.clone(), mint.clone())),
+                ) {
                     let mut leader_hist = leader_hist_ref.clone();
                     let mut follower_hist = follower_hist_ref.clone();
                     leader_hist.sort_by_key(|t| t.timestamp);
@@ -737,45 +915,81 @@ impl LinkGraph {
                                 let l_buy = l1; // Already have the first buy
                                 let f_buy = f1; // Already have the first buy
 
-                                let leader_sells: Vec<_> = leader_hist.iter().filter(|t| t.trade_type == 1).collect();
-                                let follower_sells: Vec<_> = follower_hist.iter().filter(|t| t.trade_type == 1).collect();
-                                let leader_sell_total: f64 = leader_sells.iter().map(|t| t.total_usd).sum();
-                                let follower_sell_total: f64 = follower_sells.iter().map(|t| t.total_usd).sum();
-                                let leader_pnl = if l_buy.total_usd > 0.0 { (leader_sell_total - l_buy.total_usd) / l_buy.total_usd } else { 0.0 };
-                                let follower_pnl = if f_buy.total_usd > 0.0 { (follower_sell_total - f_buy.total_usd) / f_buy.total_usd } else { 0.0 };
-                                let leader_first_sell = leader_sells.iter().min_by_key(|t| t.timestamp);
-                                let follower_first_sell = follower_sells.iter().min_by_key(|t| t.timestamp);
+                                let leader_sells: Vec<_> =
+                                    leader_hist.iter().filter(|t| t.trade_type == 1).collect();
+                                let follower_sells: Vec<_> =
+                                    follower_hist.iter().filter(|t| t.trade_type == 1).collect();
+                                let leader_sell_total: f64 =
+                                    leader_sells.iter().map(|t| t.total_usd).sum();
+                                let follower_sell_total: f64 =
+                                    follower_sells.iter().map(|t| t.total_usd).sum();
+                                let leader_pnl = if l_buy.total_usd > 0.0 {
+                                    (leader_sell_total - l_buy.total_usd) / l_buy.total_usd
+                                } else {
+                                    0.0
+                                };
+                                let follower_pnl = if f_buy.total_usd > 0.0 {
+                                    (follower_sell_total - f_buy.total_usd) / f_buy.total_usd
+                                } else {
+                                    0.0
+                                };
+                                let leader_first_sell =
+                                    leader_sells.iter().min_by_key(|t| t.timestamp);
+                                let follower_first_sell =
+                                    follower_sells.iter().min_by_key(|t| t.timestamp);
 
                                 let (sell_gap, l_sell_sig, f_sell_sig, f_sell_slip) =
-                                    if let (Some(l_sell), Some(f_sell)) = (leader_first_sell, follower_first_sell) {
-                                        ((f_sell.timestamp as i64 - l_sell.timestamp as i64).abs(), l_sell.signature.clone(), f_sell.signature.clone(), f_sell.slippage)
+                                    if let (Some(l_sell), Some(f_sell)) =
+                                        (leader_first_sell, follower_first_sell)
+                                    {
+                                        (
+                                            (f_sell.timestamp as i64 - l_sell.timestamp as i64)
+                                                .abs(),
+                                            l_sell.signature.clone(),
+                                            f_sell.signature.clone(),
+                                            f_sell.slippage,
+                                        )
                                     } else {
                                         (0, "".to_string(), "".to_string(), 0.0)
                                     };
 
                                 links.push(FollowerLink::Copied(CopiedTradeLink {
                                     timestamp: f_buy.timestamp as i64,
-                                    follower: follower_wallet.clone(), leader: leader_wallet.clone(), mint: mint.clone(),
+                                    follower: follower_wallet.clone(),
+                                    leader: leader_wallet.clone(),
+                                    mint: mint.clone(),
                                     time_gap_on_buy_sec: first_gap, // Use the already calculated gap
                                     time_gap_on_sell_sec: sell_gap,
-                                    leader_pnl, follower_pnl, leader_buy_sig: l_buy.signature.clone(),
-                                    leader_sell_sig: l_sell_sig, follower_buy_sig: f_buy.signature.clone(),
-                                    follower_sell_sig: f_sell_sig, leader_buy_total: l_buy.total_usd,
-                                    leader_sell_total, follower_buy_total: f_buy.total_usd, follower_sell_total,
-                                    follower_buy_slippage: f_buy.slippage, follower_sell_slippage: f_sell_slip,
+                                    leader_pnl,
+                                    follower_pnl,
+                                    leader_buy_sig: l_buy.signature.clone(),
+                                    leader_sell_sig: l_sell_sig,
+                                    follower_buy_sig: f_buy.signature.clone(),
+                                    follower_sell_sig: f_sell_sig,
+                                    leader_buy_total: l_buy.total_usd,
+                                    leader_sell_total,
+                                    follower_buy_total: f_buy.total_usd,
+                                    follower_sell_total,
+                                    follower_buy_slippage: f_buy.slippage,
+                                    follower_sell_slippage: f_sell_slip,
                                 }));
-                            } 
+                            }
                             // B) ELSE, if the first trades are not both buys, it's a COORDINATED_ACTIVITY.
                             else {
                                 let leader_second_trade = leader_hist.get(1);
                                 let follower_second_trade = follower_hist.get(1);
 
-                                let (l2_sig, f2_sig, second_gap) = 
-                                    if let (Some(l2), Some(f2)) = (leader_second_trade, follower_second_trade) {
-                                        (l2.signature.clone(), f2.signature.clone(), (f2.timestamp as i64 - l2.timestamp as i64).abs())
-                                    } else {
-                                        ("".to_string(), "".to_string(), 0)
-                                    };
+                                let (l2_sig, f2_sig, second_gap) = if let (Some(l2), Some(f2)) =
+                                    (leader_second_trade, follower_second_trade)
+                                {
+                                    (
+                                        l2.signature.clone(),
+                                        f2.signature.clone(),
+                                        (f2.timestamp as i64 - l2.timestamp as i64).abs(),
+                                    )
+                                } else {
+                                    ("".to_string(), "".to_string(), 0)
+                                };
 
                                 links.push(FollowerLink::Coordinated(CoordinatedActivityLink {
                                     timestamp: l1.timestamp as i64,
@@ -797,47 +1011,67 @@ impl LinkGraph {
         }
         Ok(links)
     }
-    
+
     async fn detect_and_write_top_trader_links(&self, trades: &[TradeRow]) -> Result<()> {
         let cfg = &*LINK_GRAPH_CONFIG;
-        let active_trader_pairs: Vec<(String, String)> = trades.iter()
+        let active_trader_pairs: Vec<(String, String)> = trades
+            .iter()
             .map(|t| (t.maker.clone(), t.base_address.clone()))
             .unique()
             .collect();
 
-        if active_trader_pairs.is_empty() { return Ok(()); }
+        if active_trader_pairs.is_empty() {
+            return Ok(());
+        }
 
         // --- NEW: CONFIDENCE FILTER ---
         // 1. Get all unique mints from the active pairs.
-        let unique_mints: Vec<String> = active_trader_pairs.iter().map(|(_, mint)| mint.clone()).unique().collect();
+        let unique_mints: Vec<String> = active_trader_pairs
+            .iter()
+            .map(|(_, mint)| mint.clone())
+            .unique()
+            .collect();
 
         #[derive(Row, Deserialize, Debug)]
-        struct MintCheck { mint_address: String }
+        struct MintCheck {
+            mint_address: String,
+        }
         let mint_query = "SELECT DISTINCT mint_address FROM mints WHERE mint_address IN ?";
-        
+
         let mut fully_tracked_mints = HashSet::new();
         let mint_chunk_small = cfg.chunk_size_mint_small;
 
         for chunk in unique_mints.chunks(mint_chunk_small) {
-            let mut cursor = self.db_client.query(mint_query).bind(chunk).fetch::<MintCheck>()?;
+            let mut cursor = self
+                .db_client
+                .query(mint_query)
+                .bind(chunk)
+                .fetch::<MintCheck>()?;
             while let Some(mint_row) = cursor.next().await? {
                 fully_tracked_mints.insert(mint_row.mint_address);
             }
         }
-        
+
         // 2. Filter the active pairs to only include those for fully tracked tokens.
-        let confident_trader_pairs: Vec<(String, String)> = active_trader_pairs.into_iter()
+        let confident_trader_pairs: Vec<(String, String)> = active_trader_pairs
+            .into_iter()
             .filter(|(_, mint)| fully_tracked_mints.contains(mint))
             .collect();
 
-        if confident_trader_pairs.is_empty() { return Ok(()); }
+        if confident_trader_pairs.is_empty() {
+            return Ok(());
+        }
         // --- END CONFIDENCE FILTER ---
 
         let mints_to_query: Vec<String> = fully_tracked_mints.iter().cloned().collect();
-        if mints_to_query.is_empty() { return Ok(()); }
+        if mints_to_query.is_empty() {
+            return Ok(());
+        }
 
         let ath_map = self.fetch_latest_ath_map(&mints_to_query).await?;
-        if ath_map.is_empty() { return Ok(()); }
+        if ath_map.is_empty() {
+            return Ok(());
+        }
 
         #[derive(Row, Deserialize, Debug)]
         struct TraderContextInfo {
@@ -849,34 +1083,41 @@ impl LinkGraph {
         let pnl_query = "
             SELECT 
                 wh.wallet_address, wh.mint_address, wh.realized_profit_pnl
-            FROM wallet_holdings AS wh FINAL
+            FROM wallet_holdings AS wh
             WHERE wh.mint_address IN ? 
-            AND wh.realized_profit_pnl > ? 
+              AND wh.realized_profit_pnl > ? 
             QUALIFY ROW_NUMBER() OVER (PARTITION BY wh.mint_address ORDER BY wh.realized_profit_pnl DESC) = 1
         ";
 
         let mut top_traders: Vec<TraderContextInfo> = Vec::new();
 
         for chunk in mints_to_query.chunks(cfg.chunk_size_mint_large) {
-            let chunk_results = self.db_client.query(pnl_query)
+            let chunk_results = self
+                .db_client
+                .query(pnl_query)
                 .bind(chunk)
                 .bind(cfg.min_top_trader_pnl)
-                .fetch_all().await
+                .fetch_all()
+                .await
                 .map_err(|e| anyhow!("[TOPTRADER_FAIL]: Top-1 PNL fetch failed. Error: {}", e))?;
             top_traders.extend(chunk_results);
         }
 
-        let links: Vec<TopTraderOfLink> = top_traders.into_iter().filter_map(|trader| {
-            ath_map.get(&trader.mint_address)
-                .filter(|ath| **ath >= cfg.ath_price_threshold_usd)
-                .map(|ath| TopTraderOfLink {
-                    timestamp: Utc::now().timestamp(),
-                    wallet: trader.wallet_address,
-                    token: trader.mint_address,
-                    pnl_at_creation: trader.realized_profit_pnl as f64,
-                    ath_usd_at_creation: *ath,
-                })
-        }).collect();
+        let links: Vec<TopTraderOfLink> = top_traders
+            .into_iter()
+            .filter_map(|trader| {
+                ath_map
+                    .get(&trader.mint_address)
+                    .filter(|ath| **ath >= cfg.ath_price_threshold_usd)
+                    .map(|ath| TopTraderOfLink {
+                        timestamp: Utc::now().timestamp(),
+                        wallet: trader.wallet_address,
+                        token: trader.mint_address,
+                        pnl_at_creation: trader.realized_profit_pnl as f64,
+                        ath_usd_at_creation: *ath,
+                    })
+            })
+            .collect();
 
         if !links.is_empty() {
             self.write_top_trader_of_links(&links).await?;
@@ -887,13 +1128,20 @@ impl LinkGraph {
 
     async fn process_liquidity_events(&self, liquidity_adds: &[LiquidityRow]) -> Result<()> {
         let cfg = &*LINK_GRAPH_CONFIG;
-        if liquidity_adds.is_empty() { return Ok(()); }
-        let unique_pools: HashSet<String> = liquidity_adds.iter().map(|l| l.pool_address.clone()).collect();
-        if unique_pools.is_empty() { return Ok(()); }
+        if liquidity_adds.is_empty() {
+            return Ok(());
+        }
+        let unique_pools: HashSet<String> = liquidity_adds
+            .iter()
+            .map(|l| l.pool_address.clone())
+            .collect();
+        if unique_pools.is_empty() {
+            return Ok(());
+        }
 
         #[derive(Row, Deserialize, Debug)]
-        struct PoolInfo { 
-            pool_address: String, 
+        struct PoolInfo {
+            pool_address: String,
             base_address: String,
             base_decimals: Option<u8>,
             quote_decimals: Option<u8>,
@@ -904,33 +1152,46 @@ impl LinkGraph {
         let unique_pools_vec: Vec<_> = unique_pools.iter().cloned().collect();
 
         for chunk in unique_pools_vec.chunks(cfg.chunk_size_large) {
-            let mut chunk_results = self.db_client.query(pool_query)
+            let mut chunk_results = self
+                .db_client
+                .query(pool_query)
                 .bind(chunk)
-                .fetch_all().await
+                .fetch_all()
+                .await
                 .map_err(|e| anyhow!("[LIQUIDITY_FAIL]: PoolQuery chunk failed. Error: {}", e))?;
             pools_info.append(&mut chunk_results);
         }
 
         let pool_to_token_map: HashMap<String, (String, Option<u8>, Option<u8>)> = pools_info
             .into_iter()
-            .map(|p| (p.pool_address, (p.base_address, p.base_decimals, p.quote_decimals)))
+            .map(|p| {
+                (
+                    p.pool_address,
+                    (p.base_address, p.base_decimals, p.quote_decimals),
+                )
+            })
             .collect();
 
-        let links: Vec<_> = liquidity_adds.iter().filter_map(|l| {
-            pool_to_token_map.get(&l.pool_address).map(|(token_address, base_decimals, quote_decimals)| {
-                let base_scale = 10f64.powi(base_decimals.unwrap_or(0) as i32);
-                let quote_scale = 10f64.powi(quote_decimals.unwrap_or(0) as i32);
-                ProvidedLiquidityLink {
-                    signature: l.signature.clone(),
-                    wallet: l.lp_provider.clone(),
-                    token: token_address.clone(),
-                    pool_address: l.pool_address.clone(),
-                    amount_base: l.base_amount as f64 / base_scale,
-                    amount_quote: l.quote_amount as f64 / quote_scale,
-                    timestamp: l.timestamp as i64,
-                }
+        let links: Vec<_> = liquidity_adds
+            .iter()
+            .filter_map(|l| {
+                pool_to_token_map.get(&l.pool_address).map(
+                    |(token_address, base_decimals, quote_decimals)| {
+                        let base_scale = 10f64.powi(base_decimals.unwrap_or(0) as i32);
+                        let quote_scale = 10f64.powi(quote_decimals.unwrap_or(0) as i32);
+                        ProvidedLiquidityLink {
+                            signature: l.signature.clone(),
+                            wallet: l.lp_provider.clone(),
+                            token: token_address.clone(),
+                            pool_address: l.pool_address.clone(),
+                            amount_base: l.base_amount as f64 / base_scale,
+                            amount_quote: l.quote_amount as f64 / quote_scale,
+                            timestamp: l.timestamp as i64,
+                        }
+                    },
+                )
             })
-        }).collect();
+            .collect();
 
         if !links.is_empty() {
             self.write_provided_liquidity_links(&links).await?;
@@ -940,27 +1201,43 @@ impl LinkGraph {
 
     async fn detect_and_write_whale_links(&self, trades: &[TradeRow]) -> Result<()> {
         let cfg = &*LINK_GRAPH_CONFIG;
-        let unique_mints_in_batch: Vec<String> = trades.iter().map(|t| t.base_address.clone()).unique().collect();
-        if unique_mints_in_batch.is_empty() { return Ok(()); }
+        let unique_mints_in_batch: Vec<String> = trades
+            .iter()
+            .map(|t| t.base_address.clone())
+            .unique()
+            .collect();
+        if unique_mints_in_batch.is_empty() {
+            return Ok(());
+        }
 
         // --- NEW: CONFIDENCE FILTER ---
         // 1. Check which of the mints in the batch have a creation event in our DB.
         #[derive(Row, Deserialize, Debug)]
-        struct MintCheck { mint_address: String }
+        struct MintCheck {
+            mint_address: String,
+        }
         let mint_query = "SELECT DISTINCT mint_address FROM mints WHERE mint_address IN ?";
-        
+
         let mut fully_tracked_mints = HashSet::new();
         for chunk in unique_mints_in_batch.chunks(cfg.chunk_size_mint_large) {
-            let mut cursor = self.db_client.query(mint_query).bind(chunk).fetch::<MintCheck>()?;
+            let mut cursor = self
+                .db_client
+                .query(mint_query)
+                .bind(chunk)
+                .fetch::<MintCheck>()?;
             while let Some(mint_row) = cursor.next().await? {
                 fully_tracked_mints.insert(mint_row.mint_address);
             }
         }
-        
-        if fully_tracked_mints.is_empty() { return Ok(()); }
+
+        if fully_tracked_mints.is_empty() {
+            return Ok(());
+        }
         let confident_mints: Vec<String> = fully_tracked_mints.iter().cloned().collect();
         let ath_map = self.fetch_latest_ath_map(&confident_mints).await?;
-        if ath_map.is_empty() { return Ok(()); }
+        if ath_map.is_empty() {
+            return Ok(());
+        }
         // --- END CONFIDENCE FILTER ---
 
         #[derive(Row, Deserialize, Debug)]
@@ -971,27 +1248,40 @@ impl LinkGraph {
         }
 
         let token_query = "SELECT token_address, total_supply, decimals FROM tokens FINAL WHERE token_address IN ?";
-        
+
         // --- RE-INTRODUCED CHUNKING for the token pre-filter ---
         const TOKEN_CHUNK_SIZE: usize = 3000;
         let mut context_map: HashMap<String, (u64, f64, u8)> = HashMap::new();
 
         for chunk in confident_mints.chunks(cfg.chunk_size_token) {
-            let chunk_results: Vec<TokenInfo> = self.db_client.query(token_query)
+            let chunk_results: Vec<TokenInfo> = self
+                .db_client
+                .query(token_query)
                 .bind(chunk)
-                .fetch_all().await
-                .map_err(|e| anyhow!("[WHALE_FAIL]: Token pre-filter query chunk failed. Error: {}", e))?;
+                .fetch_all()
+                .await
+                .map_err(|e| {
+                    anyhow!(
+                        "[WHALE_FAIL]: Token pre-filter query chunk failed. Error: {}",
+                        e
+                    )
+                })?;
             for token in chunk_results {
                 if let Some(ath) = ath_map.get(&token.token_address) {
                     if *ath >= cfg.ath_price_threshold_usd {
-                        context_map.insert(token.token_address, (token.total_supply, *ath, token.decimals));
+                        context_map.insert(
+                            token.token_address,
+                            (token.total_supply, *ath, token.decimals),
+                        );
                     }
                 }
             }
         }
         // --- END CHUNKING ---
 
-        if context_map.is_empty() { return Ok(()); }
+        if context_map.is_empty() {
+            return Ok(());
+        }
 
         let tokens_to_query: Vec<String> = context_map.keys().cloned().collect();
 
@@ -1004,7 +1294,7 @@ impl LinkGraph {
 
         let whales_query = "
             SELECT wallet_address, mint_address, current_balance 
-            FROM wallet_holdings FINAL
+            FROM wallet_holdings
             WHERE mint_address IN ? AND current_balance > 0
             QUALIFY ROW_NUMBER() OVER (PARTITION BY mint_address ORDER BY current_balance DESC) <= ?
         ";
@@ -1012,24 +1302,38 @@ impl LinkGraph {
         // --- RE-INTRODUCED CHUNKING for the main whale query ---
         let mut top_holders: Vec<WhaleInfo> = Vec::new();
         for chunk in tokens_to_query.chunks(cfg.chunk_size_token) {
-            let chunk_results = self.db_client.query(whales_query)
+            let chunk_results = self
+                .db_client
+                .query(whales_query)
                 .bind(chunk)
                 .bind(cfg.whale_rank_threshold)
-                .fetch_all().await
-                .map_err(|e| anyhow!("[WHALE_FAIL]: Batched holder query chunk failed. Error: {}", e))?;
+                .fetch_all()
+                .await
+                .map_err(|e| {
+                    anyhow!(
+                        "[WHALE_FAIL]: Batched holder query chunk failed. Error: {}",
+                        e
+                    )
+                })?;
             top_holders.extend(chunk_results);
         }
         // --- END CHUNKING ---
 
         let mut links = Vec::new();
         for holder in top_holders {
-            if let Some((raw_total_supply, ath_usd, decimals)) = context_map.get(&holder.mint_address) {
-                if *raw_total_supply == 0 { continue; }
+            if let Some((raw_total_supply, ath_usd, decimals)) =
+                context_map.get(&holder.mint_address)
+            {
+                if *raw_total_supply == 0 {
+                    continue;
+                }
 
                 // --- THE FIX ---
                 // Adjust the total supply to be human-readable before dividing.
                 let human_total_supply = *raw_total_supply as f64 / 10f64.powi(*decimals as i32);
-                if human_total_supply == 0.0 { continue; }
+                if human_total_supply == 0.0 {
+                    continue;
+                }
                 // --- END FIX ---
 
                 let holding_pct = (holder.current_balance / human_total_supply) as f32;
@@ -1048,10 +1352,12 @@ impl LinkGraph {
             self.write_whale_of_links(&links).await?;
         }
         Ok(())
-    }  
-    
+    }
+
     async fn create_wallet_nodes(&self, wallets: &HashSet<String>) -> Result<()> {
-        if wallets.is_empty() { return Ok(()); }
+        if wallets.is_empty() {
+            return Ok(());
+        }
         let cfg = &*LINK_GRAPH_CONFIG;
 
         // Convert the HashSet to a Vec to be able to create chunks
@@ -1059,22 +1365,24 @@ impl LinkGraph {
 
         // Process the wallets in smaller, manageable chunks
         for chunk in wallet_vec.chunks(cfg.chunk_size_large) {
-            let params: Vec<_> = chunk.iter().map(|addr| HashMap::from([
-                ("address", BoltType::from(addr.clone()))
-            ])).collect();
-            
+            let params: Vec<_> = chunk
+                .iter()
+                .map(|addr| HashMap::from([("address", BoltType::from(addr.clone()))]))
+                .collect();
+
             let q = query("UNWIND $wallets as wallet MERGE (w:Wallet {address: wallet.address})")
                 .param("wallets", params);
-            
+
             let _guard = NEO4J_WRITE_LOCK.lock().await;
             self.neo4j_client.run(q).await?;
         }
         Ok(())
     }
 
-
     async fn create_token_nodes(&self, tokens: &HashSet<String>) -> Result<()> {
-        if tokens.is_empty() { return Ok(()); }
+        if tokens.is_empty() {
+            return Ok(());
+        }
         let cfg = &*LINK_GRAPH_CONFIG;
 
         // Convert the HashSet to a Vec to be able to create chunks
@@ -1082,13 +1390,14 @@ impl LinkGraph {
 
         // Process the tokens in smaller, manageable chunks
         for chunk in token_vec.chunks(cfg.chunk_size_large) {
-            let params: Vec<_> = chunk.iter().map(|addr| HashMap::from([
-                ("address", BoltType::from(addr.clone())),
-            ])).collect();
-            
+            let params: Vec<_> = chunk
+                .iter()
+                .map(|addr| HashMap::from([("address", BoltType::from(addr.clone()))]))
+                .collect();
+
             let q = query("UNWIND $tokens as token MERGE (t:Token {address: token.address}) ON CREATE SET t.created_ts = token.created_ts")
                 .param("tokens", params);
-                
+
             let _guard = NEO4J_WRITE_LOCK.lock().await;
             self.neo4j_client.run(q).await?;
         }
@@ -1096,12 +1405,22 @@ impl LinkGraph {
     }
 
     async fn write_bundle_trade_links(&self, links: &[BundleTradeLink]) -> Result<()> {
-        if links.is_empty() { return Ok(()); }
-        let params: Vec<_> = links.iter().map(|l| HashMap::from([
-            ("wa", BoltType::from(l.wallet_a.clone())), ("wb", BoltType::from(l.wallet_b.clone())),
-            ("mint", BoltType::from(l.mint.clone())), ("slot", BoltType::from(l.slot)), ("timestamp", BoltType::from(l.timestamp)),
-            ("signatures", BoltType::from(l.signatures.clone()))
-        ])).collect();
+        if links.is_empty() {
+            return Ok(());
+        }
+        let params: Vec<_> = links
+            .iter()
+            .map(|l| {
+                HashMap::from([
+                    ("wa", BoltType::from(l.wallet_a.clone())),
+                    ("wb", BoltType::from(l.wallet_b.clone())),
+                    ("mint", BoltType::from(l.mint.clone())),
+                    ("slot", BoltType::from(l.slot)),
+                    ("timestamp", BoltType::from(l.timestamp)),
+                    ("signatures", BoltType::from(l.signatures.clone())),
+                ])
+            })
+            .collect();
         // Corrected relationship name to BUNDLE_TRADE for consistency
         let q = query("
             UNWIND $x as t 
@@ -1112,29 +1431,40 @@ impl LinkGraph {
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
         ");
         let _guard = NEO4J_WRITE_LOCK.lock().await;
-        self.neo4j_client.run(q.param("x", params)).await.map_err(|e| e.into())
+        self.neo4j_client
+            .run(q.param("x", params))
+            .await
+            .map_err(|e| e.into())
     }
 
     async fn write_transfer_links(&self, links: &[TransferLink]) -> Result<()> {
-        if links.is_empty() { return Ok(()); }
-        
+        if links.is_empty() {
+            return Ok(());
+        }
+
         // --- THE FIX ---
         // Use `unique_by` to get the *entire first link object* for each unique path.
         // This preserves the signature and timestamp from the first event we see.
-        let unique_links = links.iter()
+        let unique_links = links
+            .iter()
             .unique_by(|l| (&l.source, &l.destination, &l.mint))
             .collect::<Vec<_>>();
 
         // Now build the parameters with the full data from the unique links.
-        let params: Vec<_> = unique_links.iter().map(|l| HashMap::from([
-            ("source", BoltType::from(l.source.clone())),
-            ("destination", BoltType::from(l.destination.clone())),
-            ("mint", BoltType::from(l.mint.clone())),
-            ("signature", BoltType::from(l.signature.clone())), // Include the signature
-            ("timestamp", BoltType::from(l.timestamp)),       // Include the on-chain timestamp
-            ("amount", BoltType::from(l.amount)),
-        ])).collect();
-        
+        let params: Vec<_> = unique_links
+            .iter()
+            .map(|l| {
+                HashMap::from([
+                    ("source", BoltType::from(l.source.clone())),
+                    ("destination", BoltType::from(l.destination.clone())),
+                    ("mint", BoltType::from(l.mint.clone())),
+                    ("signature", BoltType::from(l.signature.clone())), // Include the signature
+                    ("timestamp", BoltType::from(l.timestamp)), // Include the on-chain timestamp
+                    ("amount", BoltType::from(l.amount)),
+                ])
+            })
+            .collect();
+
         // --- UPDATED CYPHER QUERY ---
         // The query now sets the signature and on-chain timestamp on the link when it's first created.
         let q = query("
@@ -1148,29 +1478,39 @@ impl LinkGraph {
                 r.amount = t.amount
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
         ");
-        
+
         let _guard = NEO4J_WRITE_LOCK.lock().await;
         let result = self.neo4j_client.run(q.param("x", params)).await;
         result.map_err(|e| e.into())
     }
 
-    async fn write_coordinated_activity_links(&self, links: &[CoordinatedActivityLink]) -> Result<()> {
-        if links.is_empty() { return Ok(()); }
-        
-        let params: Vec<_> = links.iter().map(|l| HashMap::from([
-            ("leader", BoltType::from(l.leader.clone())),
-            ("follower", BoltType::from(l.follower.clone())),
-            ("mint", BoltType::from(l.mint.clone())),
-            ("timestamp", BoltType::from(l.timestamp)),
-            // Use the new, correct field names
-            ("l_sig_1", BoltType::from(l.leader_first_sig.clone())),
-            ("l_sig_2", BoltType::from(l.leader_second_sig.clone())),
-            ("f_sig_1", BoltType::from(l.follower_first_sig.clone())),
-            ("f_sig_2", BoltType::from(l.follower_second_sig.clone())),
-            ("gap_1", BoltType::from(l.time_gap_on_first_sec)),
-            ("gap_2", BoltType::from(l.time_gap_on_second_sec)),
-        ])).collect();
-        
+    async fn write_coordinated_activity_links(
+        &self,
+        links: &[CoordinatedActivityLink],
+    ) -> Result<()> {
+        if links.is_empty() {
+            return Ok(());
+        }
+
+        let params: Vec<_> = links
+            .iter()
+            .map(|l| {
+                HashMap::from([
+                    ("leader", BoltType::from(l.leader.clone())),
+                    ("follower", BoltType::from(l.follower.clone())),
+                    ("mint", BoltType::from(l.mint.clone())),
+                    ("timestamp", BoltType::from(l.timestamp)),
+                    // Use the new, correct field names
+                    ("l_sig_1", BoltType::from(l.leader_first_sig.clone())),
+                    ("l_sig_2", BoltType::from(l.leader_second_sig.clone())),
+                    ("f_sig_1", BoltType::from(l.follower_first_sig.clone())),
+                    ("f_sig_2", BoltType::from(l.follower_second_sig.clone())),
+                    ("gap_1", BoltType::from(l.time_gap_on_first_sec)),
+                    ("gap_2", BoltType::from(l.time_gap_on_second_sec)),
+                ])
+            })
+            .collect();
+
         // This query now creates a single, comprehensive link per pair/mint
         let q = query("
             UNWIND $x as t
@@ -1187,26 +1527,44 @@ impl LinkGraph {
                 r.time_gap_on_second_sec = t.gap_2
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
         ");
-            
+
         let _guard = NEO4J_WRITE_LOCK.lock().await;
-        self.neo4j_client.run(q.param("x", params)).await.map_err(|e| e.into())
+        self.neo4j_client
+            .run(q.param("x", params))
+            .await
+            .map_err(|e| e.into())
     }
 
     async fn write_copied_trade_links(&self, links: &[CopiedTradeLink]) -> Result<()> {
-        if links.is_empty() { return Ok(()); }
+        if links.is_empty() {
+            return Ok(());
+        }
         // This uses the latest struct definition provided in the prompt.
-        let params: Vec<_> = links.iter().map(|l| HashMap::from([
-            ("follower", BoltType::from(l.follower.clone())), ("leader", BoltType::from(l.leader.clone())),
-            ("mint", BoltType::from(l.mint.clone())), ("buy_gap", BoltType::from(l.time_gap_on_buy_sec)),
-            ("sell_gap", BoltType::from(l.time_gap_on_sell_sec)), ("leader_pnl", BoltType::from(l.leader_pnl)),
-            ("follower_pnl", BoltType::from(l.follower_pnl)),
-            ("l_buy_sig", BoltType::from(l.leader_buy_sig.clone())), ("l_sell_sig", BoltType::from(l.leader_sell_sig.clone())),
-            ("f_buy_sig", BoltType::from(l.follower_buy_sig.clone())), ("f_sell_sig", BoltType::from(l.follower_sell_sig.clone())),
-            ("l_buy_total", BoltType::from(l.leader_buy_total)), ("l_sell_total", BoltType::from(l.leader_sell_total)),
-            ("f_buy_total", BoltType::from(l.follower_buy_total)), ("f_sell_total", BoltType::from(l.follower_sell_total)),
-            ("f_buy_slip", BoltType::from(l.follower_buy_slippage)), ("f_sell_slip", BoltType::from(l.follower_sell_slippage)),
-            ("timestamp", BoltType::from(l.timestamp)),
-        ])).collect();
+        let params: Vec<_> = links
+            .iter()
+            .map(|l| {
+                HashMap::from([
+                    ("follower", BoltType::from(l.follower.clone())),
+                    ("leader", BoltType::from(l.leader.clone())),
+                    ("mint", BoltType::from(l.mint.clone())),
+                    ("buy_gap", BoltType::from(l.time_gap_on_buy_sec)),
+                    ("sell_gap", BoltType::from(l.time_gap_on_sell_sec)),
+                    ("leader_pnl", BoltType::from(l.leader_pnl)),
+                    ("follower_pnl", BoltType::from(l.follower_pnl)),
+                    ("l_buy_sig", BoltType::from(l.leader_buy_sig.clone())),
+                    ("l_sell_sig", BoltType::from(l.leader_sell_sig.clone())),
+                    ("f_buy_sig", BoltType::from(l.follower_buy_sig.clone())),
+                    ("f_sell_sig", BoltType::from(l.follower_sell_sig.clone())),
+                    ("l_buy_total", BoltType::from(l.leader_buy_total)),
+                    ("l_sell_total", BoltType::from(l.leader_sell_total)),
+                    ("f_buy_total", BoltType::from(l.follower_buy_total)),
+                    ("f_sell_total", BoltType::from(l.follower_sell_total)),
+                    ("f_buy_slip", BoltType::from(l.follower_buy_slippage)),
+                    ("f_sell_slip", BoltType::from(l.follower_sell_slippage)),
+                    ("timestamp", BoltType::from(l.timestamp)),
+                ])
+            })
+            .collect();
         let q = query("
             UNWIND $x as t 
             MERGE (f:Wallet {address: t.follower})
@@ -1234,24 +1592,36 @@ impl LinkGraph {
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
         ");
         let _guard = NEO4J_WRITE_LOCK.lock().await;
-        self.neo4j_client.run(q.param("x", params)).await.map_err(|e| e.into())
+        self.neo4j_client
+            .run(q.param("x", params))
+            .await
+            .map_err(|e| e.into())
     }
 
     async fn write_minted_links(&self, links: &[MintedLink], mints: &[MintRow]) -> Result<()> {
-        if links.is_empty() { return Ok(()); }
+        if links.is_empty() {
+            return Ok(());
+        }
         let mint_map: HashMap<_, _> = mints.iter().map(|m| (m.signature.clone(), m)).collect();
 
-        let params: Vec<_> = links.iter().filter_map(|l| {
-            mint_map.get(&l.signature).map(|m| HashMap::from([
-                ("creator", BoltType::from(m.creator_address.clone())),
-                ("token", BoltType::from(m.mint_address.clone())),
-                ("signature", BoltType::from(l.signature.clone())), 
-                ("timestamp", BoltType::from(l.timestamp)),
-                ("buy_amount", BoltType::from(l.buy_amount)),
-            ]))
-        }).collect();
+        let params: Vec<_> = links
+            .iter()
+            .filter_map(|l| {
+                mint_map.get(&l.signature).map(|m| {
+                    HashMap::from([
+                        ("creator", BoltType::from(m.creator_address.clone())),
+                        ("token", BoltType::from(m.mint_address.clone())),
+                        ("signature", BoltType::from(l.signature.clone())),
+                        ("timestamp", BoltType::from(l.timestamp)),
+                        ("buy_amount", BoltType::from(l.buy_amount)),
+                    ])
+                })
+            })
+            .collect();
 
-        if params.is_empty() { return Ok(()); }
+        if params.is_empty() {
+            return Ok(());
+        }
         // --- MODIFIED: MERGE on the signature for idempotency ---
         let q = query("
             UNWIND $x as t 
@@ -1262,24 +1632,40 @@ impl LinkGraph {
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
         ");
         let _guard = NEO4J_WRITE_LOCK.lock().await;
-        self.neo4j_client.run(q.param("x", params)).await.map_err(|e| e.into())
+        self.neo4j_client
+            .run(q.param("x", params))
+            .await
+            .map_err(|e| e.into())
     }
 
-    async fn write_sniped_links(&self, links: &[SnipedLink], snipers: &HashMap<String, (String, String)>) -> Result<()> {
-        if links.is_empty() { return Ok(()); }
+    async fn write_sniped_links(
+        &self,
+        links: &[SnipedLink],
+        snipers: &HashMap<String, (String, String)>,
+    ) -> Result<()> {
+        if links.is_empty() {
+            return Ok(());
+        }
 
-        let params: Vec<_> = links.iter().filter_map(|l| {
-            snipers.get(&l.signature).map(|(wallet, token)| HashMap::from([
-            ("wallet", BoltType::from(wallet.clone())),
-            ("token", BoltType::from(token.clone())),
-            ("signature", BoltType::from(l.signature.clone())),
-            ("rank", BoltType::from(l.rank)),
-            ("sniped_amount", BoltType::from(l.sniped_amount)),
-            ("timestamp", BoltType::from(l.timestamp)),
-        ]))
-        }).collect();
+        let params: Vec<_> = links
+            .iter()
+            .filter_map(|l| {
+                snipers.get(&l.signature).map(|(wallet, token)| {
+                    HashMap::from([
+                        ("wallet", BoltType::from(wallet.clone())),
+                        ("token", BoltType::from(token.clone())),
+                        ("signature", BoltType::from(l.signature.clone())),
+                        ("rank", BoltType::from(l.rank)),
+                        ("sniped_amount", BoltType::from(l.sniped_amount)),
+                        ("timestamp", BoltType::from(l.timestamp)),
+                    ])
+                })
+            })
+            .collect();
 
-        if params.is_empty() { return Ok(()); }
+        if params.is_empty() {
+            return Ok(());
+        }
 
         // --- MODIFIED: MERGE on signature ---
         let q = query("
@@ -1291,28 +1677,43 @@ impl LinkGraph {
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
         ");
         let _guard = NEO4J_WRITE_LOCK.lock().await;
-        self.neo4j_client.run(q.param("x", params)).await.map_err(|e| e.into())
+        self.neo4j_client
+            .run(q.param("x", params))
+            .await
+            .map_err(|e| e.into())
     }
 
+    async fn write_locked_supply_links(
+        &self,
+        links: &[LockedSupplyLink],
+        locks: &[SupplyLockRow],
+    ) -> Result<()> {
+        if links.is_empty() {
+            return Ok(());
+        }
+        let lock_map: HashMap<_, _> = locks.iter().map(|l| (l.signature.clone(), l)).collect();
 
-    async fn write_locked_supply_links(&self, links: &[LockedSupplyLink], locks: &[SupplyLockRow]) -> Result<()> {
-        if links.is_empty() { return Ok(()); }
-        let lock_map: HashMap<_,_> = locks.iter().map(|l| (l.signature.clone(), l)).collect();
+        let params: Vec<_> = links
+            .iter()
+            .filter_map(|l| {
+                lock_map.get(&l.signature).map(|lock_row| {
+                    HashMap::from([
+                        ("sender", BoltType::from(lock_row.sender.clone())),
+                        ("recipient", BoltType::from(lock_row.recipient.clone())),
+                        ("mint", BoltType::from(lock_row.mint_address.clone())),
+                        ("signature", BoltType::from(l.signature.clone())),
+                        ("amount", BoltType::from(l.amount)),
+                        ("unlock_ts", BoltType::from(l.unlock_timestamp as i64)),
+                        ("timestamp", BoltType::from(l.timestamp)),
+                    ])
+                })
+            })
+            .collect();
 
-        let params: Vec<_> = links.iter().filter_map(|l| {
-            lock_map.get(&l.signature).map(|lock_row| HashMap::from([
-                ("sender", BoltType::from(lock_row.sender.clone())), 
-                ("recipient", BoltType::from(lock_row.recipient.clone())),
-                ("mint", BoltType::from(lock_row.mint_address.clone())),
-                ("signature", BoltType::from(l.signature.clone())), 
-                ("amount", BoltType::from(l.amount)), 
-                ("unlock_ts", BoltType::from(l.unlock_timestamp as i64)) ,
-                ("timestamp", BoltType::from(l.timestamp)),
-            ]))
-        }).collect();
+        if params.is_empty() {
+            return Ok(());
+        }
 
-        if params.is_empty() { return Ok(()); }
-        
         // --- THE CRITICAL FIX ---
         let q = query("
             UNWIND $x as t 
@@ -1323,24 +1724,36 @@ impl LinkGraph {
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
         ");
         let _guard = NEO4J_WRITE_LOCK.lock().await;
-        self.neo4j_client.run(q.param("x", params)).await.map_err(|e| e.into())
+        self.neo4j_client
+            .run(q.param("x", params))
+            .await
+            .map_err(|e| e.into())
     }
 
     async fn write_burned_links(&self, links: &[BurnedLink], burns: &[BurnRow]) -> Result<()> {
-        if links.is_empty() { return Ok(()); }
-        let burn_map: HashMap<_,_> = burns.iter().map(|b| (b.signature.clone(), b)).collect();
+        if links.is_empty() {
+            return Ok(());
+        }
+        let burn_map: HashMap<_, _> = burns.iter().map(|b| (b.signature.clone(), b)).collect();
 
-        let params: Vec<_> = links.iter().filter_map(|l| {
-            burn_map.get(&l.signature).map(|burn_row| HashMap::from([
-                ("wallet", BoltType::from(burn_row.source.clone())), 
-                ("token", BoltType::from(burn_row.mint_address.clone())),
-                ("signature", BoltType::from(l.signature.clone())), 
-                ("amount", BoltType::from(l.amount)), 
-                ("timestamp", BoltType::from(l.timestamp)),
-            ]))
-        }).collect();
-        
-        if params.is_empty() { return Ok(()); }
+        let params: Vec<_> = links
+            .iter()
+            .filter_map(|l| {
+                burn_map.get(&l.signature).map(|burn_row| {
+                    HashMap::from([
+                        ("wallet", BoltType::from(burn_row.source.clone())),
+                        ("token", BoltType::from(burn_row.mint_address.clone())),
+                        ("signature", BoltType::from(l.signature.clone())),
+                        ("amount", BoltType::from(l.amount)),
+                        ("timestamp", BoltType::from(l.timestamp)),
+                    ])
+                })
+            })
+            .collect();
+
+        if params.is_empty() {
+            return Ok(());
+        }
         // --- MODIFIED: MERGE on signature ---
         let q = query("
             UNWIND $x as t 
@@ -1350,20 +1763,30 @@ impl LinkGraph {
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
         ");
         let _guard = NEO4J_WRITE_LOCK.lock().await;
-        self.neo4j_client.run(q.param("x", params)).await.map_err(|e| e.into())
+        self.neo4j_client
+            .run(q.param("x", params))
+            .await
+            .map_err(|e| e.into())
     }
 
     async fn write_provided_liquidity_links(&self, links: &[ProvidedLiquidityLink]) -> Result<()> {
-        if links.is_empty() { return Ok(()); }
-        let params: Vec<_> = links.iter().map(|l| HashMap::from([
-            ("wallet", BoltType::from(l.wallet.clone())),
-            ("token", BoltType::from(l.token.clone())),
-            ("signature", BoltType::from(l.signature.clone())),
-            ("pool_address", BoltType::from(l.pool_address.clone())),
-            ("amount_base", BoltType::from(l.amount_base)),
-            ("amount_quote", BoltType::from(l.amount_quote)),
-            ("timestamp", BoltType::from(l.timestamp)),
-        ])).collect();
+        if links.is_empty() {
+            return Ok(());
+        }
+        let params: Vec<_> = links
+            .iter()
+            .map(|l| {
+                HashMap::from([
+                    ("wallet", BoltType::from(l.wallet.clone())),
+                    ("token", BoltType::from(l.token.clone())),
+                    ("signature", BoltType::from(l.signature.clone())),
+                    ("pool_address", BoltType::from(l.pool_address.clone())),
+                    ("amount_base", BoltType::from(l.amount_base)),
+                    ("amount_quote", BoltType::from(l.amount_quote)),
+                    ("timestamp", BoltType::from(l.timestamp)),
+                ])
+            })
+            .collect();
 
         // --- MODIFIED: MERGE on signature ---
         let q = query("
@@ -1375,19 +1798,29 @@ impl LinkGraph {
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
         ");
         let _guard = NEO4J_WRITE_LOCK.lock().await;
-        self.neo4j_client.run(q.param("x", params)).await.map_err(|e| e.into())
+        self.neo4j_client
+            .run(q.param("x", params))
+            .await
+            .map_err(|e| e.into())
     }
 
     async fn write_top_trader_of_links(&self, links: &[TopTraderOfLink]) -> Result<()> {
-        if links.is_empty() { return Ok(()); }
-        let params: Vec<_> = links.iter().map(|l| HashMap::from([
-            ("wallet", BoltType::from(l.wallet.clone())),
-            ("token", BoltType::from(l.token.clone())),
-            // Add new params
-            ("pnl_at_creation", BoltType::from(l.pnl_at_creation)),
-            ("ath_at_creation", BoltType::from(l.ath_usd_at_creation)),
-            ("timestamp", BoltType::from(l.timestamp)),
-        ])).collect();
+        if links.is_empty() {
+            return Ok(());
+        }
+        let params: Vec<_> = links
+            .iter()
+            .map(|l| {
+                HashMap::from([
+                    ("wallet", BoltType::from(l.wallet.clone())),
+                    ("token", BoltType::from(l.token.clone())),
+                    // Add new params
+                    ("pnl_at_creation", BoltType::from(l.pnl_at_creation)),
+                    ("ath_at_creation", BoltType::from(l.ath_usd_at_creation)),
+                    ("timestamp", BoltType::from(l.timestamp)),
+                ])
+            })
+            .collect();
 
         // --- MODIFIED: The definitive Cypher query ---
         let q = query("
@@ -1402,20 +1835,30 @@ impl LinkGraph {
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
         ");
         let _guard = NEO4J_WRITE_LOCK.lock().await;
-        self.neo4j_client.run(q.param("x", params)).await.map_err(|e| e.into())
+        self.neo4j_client
+            .run(q.param("x", params))
+            .await
+            .map_err(|e| e.into())
     }
 
     async fn write_whale_of_links(&self, links: &[WhaleOfLink]) -> Result<()> {
-        if links.is_empty() { return Ok(()); }
-        let params: Vec<_> = links.iter().map(|l| HashMap::from([
-            ("wallet", BoltType::from(l.wallet.clone())),
-            ("token", BoltType::from(l.token.clone())),
-            // Add new params
-            ("pct_at_creation", BoltType::from(l.holding_pct_at_creation)),
-            ("ath_at_creation", BoltType::from(l.ath_usd_at_creation)),
-            ("timestamp", BoltType::from(l.timestamp)),
-        ])).collect();
-        
+        if links.is_empty() {
+            return Ok(());
+        }
+        let params: Vec<_> = links
+            .iter()
+            .map(|l| {
+                HashMap::from([
+                    ("wallet", BoltType::from(l.wallet.clone())),
+                    ("token", BoltType::from(l.token.clone())),
+                    // Add new params
+                    ("pct_at_creation", BoltType::from(l.holding_pct_at_creation)),
+                    ("ath_at_creation", BoltType::from(l.ath_usd_at_creation)),
+                    ("timestamp", BoltType::from(l.timestamp)),
+                ])
+            })
+            .collect();
+
         // --- MODIFIED: The definitive Cypher query ---
         let q = query("
             UNWIND $x as t
@@ -1429,10 +1872,16 @@ impl LinkGraph {
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
         ");
         let _guard = NEO4J_WRITE_LOCK.lock().await;
-        self.neo4j_client.run(q.param("x", params)).await.map_err(|e| e.into())
+        self.neo4j_client
+            .run(q.param("x", params))
+            .await
+            .map_err(|e| e.into())
     }
 
-    async fn fetch_latest_ath_map(&self, token_addresses: &[String]) -> Result<HashMap<String, f64>> {
+    async fn fetch_latest_ath_map(
+        &self,
+        token_addresses: &[String],
+    ) -> Result<HashMap<String, f64>> {
         let mut ath_map = HashMap::new();
         if token_addresses.is_empty() {
             return Ok(ath_map);
@@ -1453,7 +1902,8 @@ impl LinkGraph {
         ";
 
         for chunk in token_addresses.chunks(cfg.chunk_size_large) {
-            let mut chunk_rows: Vec<AthInfo> = self.db_client
+            let mut chunk_rows: Vec<AthInfo> = self
+                .db_client
                 .query(query)
                 .bind(chunk)
                 .fetch_all()
@@ -1469,7 +1919,7 @@ impl LinkGraph {
 
     async fn fetch_pnl(&self, wallet_address: &str, mint_address: &str) -> Result<f64> {
         let q_str = format!(
-            "SELECT realized_profit_pnl FROM wallet_holdings FINAL WHERE wallet_address = '{}' AND mint_address = '{}'",
+            "SELECT realized_profit_pnl FROM wallet_holdings WHERE wallet_address = '{}' AND mint_address = '{}'",
             wallet_address, mint_address
         );
         // Fetch the pre-calculated f32 value

@@ -1,10 +1,11 @@
-use crate::handlers::{anchor_event_discriminator, constants, Idl, TransactionHandler};
+use crate::handlers::IdlAccount;
+use crate::handlers::streamflow_idl::{CreateArgs, TopupArgs, UpdateArgs, WithdrawArgs};
+use crate::handlers::{Idl, TransactionHandler, anchor_event_discriminator, constants};
 use crate::spl_system_decoder;
 use crate::types::{
     EventPayload, EventType, FormattedInstruction, SupplyLockActionRow, SupplyLockRow,
     UnifiedTransaction,
 };
-use crate::handlers::streamflow_idl::{CreateArgs, TopupArgs, UpdateArgs, WithdrawArgs};
 use crate::utils::{deserialize_lax, find_account_pubkey_in_instruction, get_priority_fee};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -13,7 +14,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
-use crate::handlers::IdlAccount;
 use yellowstone_grpc_proto::prelude::InnerInstruction;
 
 //==============================================================================
@@ -37,9 +37,8 @@ pub enum DecodedInstruction {
 pub struct DecodedAction<'a> {
     pub instruction: DecodedInstruction,
     pub instruction_accounts: &'a [u8],
-    pub parent_ix: &'a FormattedInstruction<'a>, 
+    pub parent_ix: &'a FormattedInstruction<'a>,
 }
-
 
 #[derive(Deserialize)]
 struct StreamflowIdlInstruction {
@@ -81,7 +80,8 @@ impl StreamflowDecoder {
         let mut instruction_discriminators = HashMap::new();
         let mut instruction_layouts = HashMap::new();
 
-        for ix in idl.instructions { // This now correctly iterates over StreamflowIdlInstruction
+        for ix in idl.instructions {
+            // This now correctly iterates over StreamflowIdlInstruction
             let disc = anchor_global_instruction_discriminator(&ix.name);
             let account_map: HashMap<String, usize> = ix
                 .accounts
@@ -168,14 +168,12 @@ impl StreamflowDecoder {
                         return Ok(Some(DecodedInstruction::Withdraw(args)));
                     }
                 }
-                "cancel" => { 
-                    return Ok(Some(DecodedInstruction::Cancel))},
+                "cancel" => return Ok(Some(DecodedInstruction::Cancel)),
                 _ => {} // Other instructions are decoded but ignored for now
             }
         }
         Ok(None)
     }
-
 }
 
 //==============================================================================
@@ -211,7 +209,14 @@ impl TransactionHandler for StreamflowHandler {
                 if let Some(name) = log.strip_prefix("Program log: Instruction: ") {
                     if matches!(
                         name,
-                        "Create" | "Withdraw" | "Cancel" | "Topup" | "TransferRecipient" | "Pause" | "Unpause" | "Update"
+                        "Create"
+                            | "Withdraw"
+                            | "Cancel"
+                            | "Topup"
+                            | "TransferRecipient"
+                            | "Pause"
+                            | "Unpause"
+                            | "Update"
                     ) {
                         return true;
                     }
@@ -251,7 +256,7 @@ impl TransactionHandler for StreamflowHandler {
                     // Based on your data, 1 means "days". Other values might mean seconds, minutes, etc.
                     let seconds_per_unit = match args.period {
                         // You may need to find the other values, but for this transaction, 1 is days.
-                        1 => 86_400,   // 1 = Days
+                        1 => 86_400, // 1 = Days
                         // Add other potential cases if you discover them, e.g.,
                         // 0 => 1,         // Seconds
                         // 2 => 3_600,     // Hours
@@ -261,25 +266,56 @@ impl TransactionHandler for StreamflowHandler {
                     };
 
                     // The total duration of one period is the frequency multiplied by the unit in seconds.
-                    let duration_of_one_period = args.withdraw_frequency.saturating_mul(seconds_per_unit);
-                    
+                    let duration_of_one_period =
+                        args.withdraw_frequency.saturating_mul(seconds_per_unit);
+
                     // The total duration of the entire stream is that multiplied by the number of periods.
                     let total_duration = num_periods.saturating_mul(duration_of_one_period);
 
                     let effective_start = args.cliff.max(args.start_time);
                     let final_unlock_timestamp = effective_start.saturating_add(total_duration);
 
+                    let contract_address = find_account_pubkey_in_instruction(
+                        &self.decoder.instruction_layouts,
+                        "create",
+                        "metadata",
+                        action.instruction_accounts,
+                        &tx.account_keys,
+                    )
+                    .map(|p| p.to_string())
+                    .unwrap_or_default();
+                    let sender = find_account_pubkey_in_instruction(
+                        &self.decoder.instruction_layouts,
+                        "create",
+                        "sender",
+                        action.instruction_accounts,
+                        &tx.account_keys,
+                    )
+                    .map(|p| p.to_string())
+                    .unwrap_or_default();
+                    let recipient = find_account_pubkey_in_instruction(
+                        &self.decoder.instruction_layouts,
+                        "create",
+                        "recipient",
+                        action.instruction_accounts,
+                        &tx.account_keys,
+                    )
+                    .map(|p| p.to_string())
+                    .unwrap_or_default();
+                    let mint_address = find_account_pubkey_in_instruction(
+                        &self.decoder.instruction_layouts,
+                        "create",
+                        "mint",
+                        action.instruction_accounts,
+                        &tx.account_keys,
+                    )
+                    .map(|p| p.to_string())
+                    .unwrap_or_default();
 
-
-                    let contract_address =find_account_pubkey_in_instruction(&self.decoder.instruction_layouts, "create", "metadata", action.instruction_accounts, &tx.account_keys).map(|p| p.to_string()).unwrap_or_default();
-                    let sender = find_account_pubkey_in_instruction(&self.decoder.instruction_layouts, "create", "sender", action.instruction_accounts, &tx.account_keys).map(|p| p.to_string()).unwrap_or_default();
-                    let recipient = find_account_pubkey_in_instruction(&self.decoder.instruction_layouts, "create", "recipient", action.instruction_accounts, &tx.account_keys).map(|p| p.to_string()).unwrap_or_default();
-                    let mint_address = find_account_pubkey_in_instruction(&self.decoder.instruction_layouts, "create", "mint", action.instruction_accounts, &tx.account_keys).map(|p| p.to_string()).unwrap_or_default();
-                   
                     let decimals = tx.token_decimals.get(&mint_address).cloned().unwrap_or(0);
                     let divisor = 10f64.powi(decimals as i32);
                     let total_locked_amount = args.net_amount_deposited as f64 / divisor;
-                    
+
                     let row = SupplyLockRow {
                         signature: tx.signature.to_string(),
                         timestamp: tx.block_time,
@@ -298,7 +334,6 @@ impl TransactionHandler for StreamflowHandler {
                     Some(EventType::SupplyLock(row))
                 }
                 DecodedInstruction::Withdraw(args) => {
-
                     let mut actual_withdrawn_amount = 0;
 
                     for inner_ix_cow in &action.parent_ix.inner_instructions {
@@ -320,10 +355,34 @@ impl TransactionHandler for StreamflowHandler {
                     }
 
                     if actual_withdrawn_amount > 0 {
-                        let contract_address = find_account_pubkey_in_instruction(&self.decoder.instruction_layouts, "withdraw", "metadata", action.instruction_accounts, &tx.account_keys).map(|p| p.to_string()).unwrap_or_default();
-                        let user = find_account_pubkey_in_instruction(&self.decoder.instruction_layouts, "withdraw", "authority", action.instruction_accounts, &tx.account_keys).map(|p| p.to_string()).unwrap_or_default();
-                        let mint_address = find_account_pubkey_in_instruction(&self.decoder.instruction_layouts, "withdraw", "mint", action.instruction_accounts, &tx.account_keys).map(|p| p.to_string()).unwrap_or_default();
-                        
+                        let contract_address = find_account_pubkey_in_instruction(
+                            &self.decoder.instruction_layouts,
+                            "withdraw",
+                            "metadata",
+                            action.instruction_accounts,
+                            &tx.account_keys,
+                        )
+                        .map(|p| p.to_string())
+                        .unwrap_or_default();
+                        let user = find_account_pubkey_in_instruction(
+                            &self.decoder.instruction_layouts,
+                            "withdraw",
+                            "authority",
+                            action.instruction_accounts,
+                            &tx.account_keys,
+                        )
+                        .map(|p| p.to_string())
+                        .unwrap_or_default();
+                        let mint_address = find_account_pubkey_in_instruction(
+                            &self.decoder.instruction_layouts,
+                            "withdraw",
+                            "mint",
+                            action.instruction_accounts,
+                            &tx.account_keys,
+                        )
+                        .map(|p| p.to_string())
+                        .unwrap_or_default();
+
                         let decimals = tx.token_decimals.get(&mint_address).cloned().unwrap_or(0);
                         let divisor = 10f64.powi(decimals as i32);
                         let amount = actual_withdrawn_amount as f64 / divisor;
@@ -344,10 +403,12 @@ impl TransactionHandler for StreamflowHandler {
                         };
                         Some(EventType::SupplyLockAction(row))
                     } else {
-                        println!("[StreamflowHandler] WARN: Could not find inner TransferChecked for Withdraw in tx {}", tx.signature);
+                        println!(
+                            "[StreamflowHandler] WARN: Could not find inner TransferChecked for Withdraw in tx {}",
+                            tx.signature
+                        );
                         None
                     }
-                    
                 }
                 DecodedInstruction::Cancel => {
                     let mut actual_cancelled_amount = 0;
@@ -358,20 +419,51 @@ impl TransactionHandler for StreamflowHandler {
                             accounts: inner_ix.accounts.clone(),
                             data: inner_ix.data.clone(),
                         };
-                        if let Ok(Some(spl_system_decoder::DecodedInstruction::SplTokenTransferChecked { amount, .. })) =
-                        spl_system_decoder::decode_instruction(&temp_compiled_ix, &tx.account_keys) {
+                        if let Ok(Some(
+                            spl_system_decoder::DecodedInstruction::SplTokenTransferChecked {
+                                amount,
+                                ..
+                            },
+                        )) = spl_system_decoder::decode_instruction(
+                            &temp_compiled_ix,
+                            &tx.account_keys,
+                        ) {
                             actual_cancelled_amount = amount;
                             break;
                         }
                     }
                     if actual_cancelled_amount > 0 {
-                        let mint_address = find_account_pubkey_in_instruction(&self.decoder.instruction_layouts, "cancel", "mint", action.instruction_accounts, &tx.account_keys).map(|p| p.to_string()).unwrap_or_default();
+                        let mint_address = find_account_pubkey_in_instruction(
+                            &self.decoder.instruction_layouts,
+                            "cancel",
+                            "mint",
+                            action.instruction_accounts,
+                            &tx.account_keys,
+                        )
+                        .map(|p| p.to_string())
+                        .unwrap_or_default();
                         let decimals = tx.token_decimals.get(&mint_address).cloned().unwrap_or(0);
                         let divisor = 10f64.powi(decimals as i32);
-                        let contract_address = find_account_pubkey_in_instruction(&self.decoder.instruction_layouts, "cancel", "metadata", action.instruction_accounts, &tx.account_keys).map(|p| p.to_string()).unwrap_or_default();
-                        let user = find_account_pubkey_in_instruction(&self.decoder.instruction_layouts, "cancel", "authority", action.instruction_accounts, &tx.account_keys).map(|p| p.to_string()).unwrap_or_default();
+                        let contract_address = find_account_pubkey_in_instruction(
+                            &self.decoder.instruction_layouts,
+                            "cancel",
+                            "metadata",
+                            action.instruction_accounts,
+                            &tx.account_keys,
+                        )
+                        .map(|p| p.to_string())
+                        .unwrap_or_default();
+                        let user = find_account_pubkey_in_instruction(
+                            &self.decoder.instruction_layouts,
+                            "cancel",
+                            "authority",
+                            action.instruction_accounts,
+                            &tx.account_keys,
+                        )
+                        .map(|p| p.to_string())
+                        .unwrap_or_default();
                         let normalized_amount = actual_cancelled_amount as f64 / divisor;
-                        
+
                         let row = SupplyLockActionRow {
                             signature: tx.signature.to_string(),
                             timestamp: tx.block_time,
@@ -388,13 +480,16 @@ impl TransactionHandler for StreamflowHandler {
                         };
                         Some(EventType::SupplyLockAction(row))
                     } else {
-                        println!("[StreamflowHandler] WARN: Could not find inner TransferChecked for Cancel in tx {}", tx.signature);
+                        println!(
+                            "[StreamflowHandler] WARN: Could not find inner TransferChecked for Cancel in tx {}",
+                            tx.signature
+                        );
                         None
                     }
                 }
                 _ => None,
             };
-            
+
             if let Some(event) = event_type {
                 events.push(EventPayload {
                     timestamp: tx.block_time,

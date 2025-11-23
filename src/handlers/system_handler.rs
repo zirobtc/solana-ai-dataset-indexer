@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use anyhow::Result;
 use async_trait::async_trait;
 use clickhouse::Client;
-use redis::aio::MultiplexedConnection;
-use redis::AsyncCommands;
 use once_cell::sync::Lazy;
+use redis::AsyncCommands;
+use redis::aio::MultiplexedConnection;
 use solana_sdk::{native_token::LAMPORTS_PER_SOL, pubkey::Pubkey};
 use std::str::FromStr;
 
@@ -15,12 +15,14 @@ use crate::{
     handlers::constants,
     spl_system_decoder,
     types::{EventPayload, EventType, TokenBalanceMap, TransferRow, UnifiedTransaction},
-    utils::{get_asset_balances, get_priority_fee, TIP_ACCOUNTS},
+    utils::{TIP_ACCOUNTS, get_asset_balances, get_priority_fee},
 };
 
 const SYSTEM_PROGRAM_ID: Pubkey = solana_sdk::system_program::ID;
-static TRANSFER_THRESHOLD_LAMPORTS: Lazy<u64> = Lazy::new(|| env_parse("SYSTEM_TRANSFER_THRESHOLD_LAMPORTS", 10_000_000_u64));
-static SPAM_TRANSFER_COUNT_THRESHOLD: Lazy<usize> = Lazy::new(|| env_parse("SYSTEM_SPAM_TRANSFER_COUNT_THRESHOLD", 3_usize));
+static TRANSFER_THRESHOLD_LAMPORTS: Lazy<u64> =
+    Lazy::new(|| env_parse("SYSTEM_TRANSFER_THRESHOLD_LAMPORTS", 10_000_000_u64));
+static SPAM_TRANSFER_COUNT_THRESHOLD: Lazy<usize> =
+    Lazy::new(|| env_parse("SYSTEM_SPAM_TRANSFER_COUNT_THRESHOLD", 3_usize));
 
 fn env_parse<T: FromStr>(key: &str, default: T) -> T {
     std::env::var(key)
@@ -28,7 +30,6 @@ fn env_parse<T: FromStr>(key: &str, default: T) -> T {
         .and_then(|v| v.parse::<T>().ok())
         .unwrap_or(default)
 }
-
 
 pub struct SystemHandler {}
 
@@ -75,11 +76,12 @@ impl TransactionHandler for SystemHandler {
         tx: &UnifiedTransaction,
         native_price_usd: f64,
     ) -> Result<Vec<EventPayload>> {
-        
         // --- NEW: EFFICIENT LOG-BASED SPAM FILTER ---
 
         // 1. Pre-scan logs to count System Program invocations.
-        let system_transfer_count = tx.logs.iter()
+        let system_transfer_count = tx
+            .logs
+            .iter()
             .filter(|log| log.starts_with("Program 11111111111111111111111111111111 invoke"))
             .count();
 
@@ -89,12 +91,10 @@ impl TransactionHandler for SystemHandler {
 
         // 2. Apply the filter: Skip if there are too many transfers.
         if system_transfer_count > *SPAM_TRANSFER_COUNT_THRESHOLD {
-
             return Ok(Vec::new());
         }
 
         // --- END FILTER ---
-
 
         let mut transfer_rows: Vec<TransferRow> = Vec::new();
         let priority_fee = get_priority_fee(tx);
@@ -114,7 +114,6 @@ impl TransactionHandler for SystemHandler {
                         lamports,
                     })) = spl_system_decoder::decode_instruction(ix, &tx.account_keys)
                     {
-
                         // 1. Ignore self-sent transfers
                         if source == destination {
                             continue;
@@ -125,17 +124,18 @@ impl TransactionHandler for SystemHandler {
                         if TIP_ACCOUNTS.contains(&destination_str.as_str()) {
                             continue;
                         }
-                        
+
                         if lamports < *TRANSFER_THRESHOLD_LAMPORTS {
                             continue; // Skip this instruction
                         }
 
-
                         let source_str = source.to_string();
                         let destination_str = destination.to_string();
 
-                        let (source_pre_balance, source_post_balance) = get_asset_balances(tx, &source, constants::NATIVE_MINT);
-                        let (destination_pre_balance, destination_post_balance) = get_asset_balances(tx, &destination, constants::NATIVE_MINT);
+                        let (source_pre_balance, source_post_balance) =
+                            get_asset_balances(tx, &source, constants::NATIVE_MINT);
+                        let (destination_pre_balance, destination_post_balance) =
+                            get_asset_balances(tx, &destination, constants::NATIVE_MINT);
 
                         let transfer_rows = TransferRow {
                             signature: tx.signature.to_string(),
@@ -150,17 +150,15 @@ impl TransactionHandler for SystemHandler {
                             amount: lamports,
                             amount_decimal: lamports as f64 / LAMPORTS_PER_SOL as f64,
                             source_balance: source_post_balance,
-                            destination_balance: destination_post_balance
+                            destination_balance: destination_post_balance,
                         };
-                        
-                        events.push(
-                            EventPayload { 
-                                timestamp: tx.block_time,
-                                event: EventType::Transfer(transfer_rows), 
-                                balances: tx.post_balances.clone(), 
-                                token_decimals: tx.token_decimals.clone() 
-                            }
-                        )
+
+                        events.push(EventPayload {
+                            timestamp: tx.block_time,
+                            event: EventType::Transfer(transfer_rows),
+                            balances: tx.post_balances.clone(),
+                            token_decimals: tx.token_decimals.clone(),
+                        })
                     }
                 }
             }
@@ -171,5 +169,6 @@ impl TransactionHandler for SystemHandler {
 }
 
 fn is_sol_transfer_activity(logs: &[String]) -> bool {
-    logs.iter().any(|log| log.contains("Program 11111111111111111111111111111111 invoke [1]"))
+    logs.iter()
+        .any(|log| log.contains("Program 11111111111111111111111111111111 invoke [1]"))
 }
