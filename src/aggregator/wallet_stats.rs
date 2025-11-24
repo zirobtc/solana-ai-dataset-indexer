@@ -17,8 +17,11 @@ use solana_sdk::native_token::LAMPORTS_PER_SOL;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
 use std::str::FromStr;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::time::Duration;
-use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 use tokio::sync::mpsc;
 
 type ProfileCache = HashMap<String, WalletProfileEntry>;

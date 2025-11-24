@@ -27,7 +27,10 @@ use redis::{AsyncCommands, streams::StreamMaxlen};
 use std::{
     collections::HashMap,
     env,
-    sync::{Arc, atomic::{AtomicUsize, Ordering}},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     vec,
 };
@@ -801,7 +804,7 @@ async fn main() -> Result<()> {
         let writer_depth = link_graph_writer_depth.clone();
         let writer_rx = link_graph_write_receiver;
         let writer_task = tokio::spawn(async move {
-            link_graph::LinkGraph::writer_task(writer_rx, writer_client, writer_depth).await;
+            LinkGraph::writer_task(writer_rx, writer_client, writer_depth).await;
             Result::<()>::Ok(())
         });
         tasks.push(writer_task);

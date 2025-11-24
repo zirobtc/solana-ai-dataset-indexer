@@ -15,16 +15,16 @@ use futures::stream::{self, StreamExt};
 use itertools::Itertools;
 use neo4rs::{BoltType, Graph, query};
 use once_cell::sync::Lazy;
-use tokio::sync::{mpsc, Mutex};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use serde::Deserialize;
 use solana_sdk::native_token::LAMPORTS_PER_SOL;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-use tokio::time::{Instant, MissedTickBehavior, interval};
+use tokio::sync::{Mutex, mpsc};
 use tokio::time::sleep;
+use tokio::time::{Instant, MissedTickBehavior, interval};
 use tokio::try_join;
 
 fn decimals_for_quote(mint: &str) -> u8 {
@@ -249,8 +249,7 @@ impl LinkGraph {
         Ok(())
     }
 
-    async fn process_time_window
-(&self, payloads: &[EventPayload]) -> Result<()> {
+    async fn process_time_window(&self, payloads: &[EventPayload]) -> Result<()> {
         let cfg = &*LINK_GRAPH_CONFIG;
         let mut unique_wallets = HashSet::new();
         let mut unique_tokens = HashSet::new();
@@ -434,7 +433,10 @@ impl LinkGraph {
         }
 
         if cache.len() > cfg.trade_cache_max_entries {
-            let mut entries: Vec<_> = cache.iter().map(|(k, v)| (k.clone(), v.last_seen)).collect();
+            let mut entries: Vec<_> = cache
+                .iter()
+                .map(|(k, v)| (k.clone(), v.last_seen))
+                .collect();
             entries.sort_by_key(|(_, ts)| *ts);
             let to_drop = entries.len().saturating_sub(cfg.trade_cache_max_entries);
             for (key, _) in entries.into_iter().take(to_drop) {
@@ -547,7 +549,11 @@ impl LinkGraph {
             });
         }
         self.write_minted_links(&links, mints).await?;
-        println!("[LinkGraph] [Profile] process_mints: {} mints in {:?}", mints.len(), start.elapsed());
+        println!(
+            "[LinkGraph] [Profile] process_mints: {} mints in {:?}",
+            mints.len(),
+            start.elapsed()
+        );
         Ok(())
     }
 
@@ -566,7 +572,11 @@ impl LinkGraph {
             })
             .collect();
         self.write_locked_supply_links(&links, locks).await?;
-        println!("[LinkGraph] [Profile] process_supply_locks: {} locks in {:?}", locks.len(), start.elapsed());
+        println!(
+            "[LinkGraph] [Profile] process_supply_locks: {} locks in {:?}",
+            locks.len(),
+            start.elapsed()
+        );
         Ok(())
     }
 
@@ -584,7 +594,11 @@ impl LinkGraph {
             })
             .collect();
         self.write_burned_links(&links, burns).await?;
-        println!("[LinkGraph] [Profile] process_burns: {} burns in {:?}", burns.len(), start.elapsed());
+        println!(
+            "[LinkGraph] [Profile] process_burns: {} burns in {:?}",
+            burns.len(),
+            start.elapsed()
+        );
         Ok(())
     }
 
@@ -608,7 +622,11 @@ impl LinkGraph {
             .collect();
 
         self.write_transfer_links(&transfer_links).await?;
-        println!("[LinkGraph] [Profile] process_transfers: {} transfers in {:?}", transfers.len(), start.elapsed());
+        println!(
+            "[LinkGraph] [Profile] process_transfers: {} transfers in {:?}",
+            transfers.len(),
+            start.elapsed()
+        );
         Ok(())
     }
 
@@ -1503,7 +1521,10 @@ impl LinkGraph {
                     ("mint".to_string(), BoltType::from(l.mint.clone())),
                     ("slot".to_string(), BoltType::from(l.slot)),
                     ("timestamp".to_string(), BoltType::from(l.timestamp)),
-                    ("signatures".to_string(), BoltType::from(l.signatures.clone())),
+                    (
+                        "signatures".to_string(),
+                        BoltType::from(l.signatures.clone()),
+                    ),
                 ])
             })
             .collect();
@@ -1538,7 +1559,10 @@ impl LinkGraph {
             .map(|l| {
                 HashMap::from([
                     ("source".to_string(), BoltType::from(l.source.clone())),
-                    ("destination".to_string(), BoltType::from(l.destination.clone())),
+                    (
+                        "destination".to_string(),
+                        BoltType::from(l.destination.clone()),
+                    ),
                     ("mint".to_string(), BoltType::from(l.mint.clone())),
                     ("signature".to_string(), BoltType::from(l.signature.clone())), // Include the signature
                     ("timestamp".to_string(), BoltType::from(l.timestamp)), // Include the on-chain timestamp
@@ -1581,12 +1605,27 @@ impl LinkGraph {
                     ("mint".to_string(), BoltType::from(l.mint.clone())),
                     ("timestamp".to_string(), BoltType::from(l.timestamp)),
                     // Use the new, correct field names
-                    ("l_sig_1".to_string(), BoltType::from(l.leader_first_sig.clone())),
-                    ("l_sig_2".to_string(), BoltType::from(l.leader_second_sig.clone())),
-                    ("f_sig_1".to_string(), BoltType::from(l.follower_first_sig.clone())),
-                    ("f_sig_2".to_string(), BoltType::from(l.follower_second_sig.clone())),
+                    (
+                        "l_sig_1".to_string(),
+                        BoltType::from(l.leader_first_sig.clone()),
+                    ),
+                    (
+                        "l_sig_2".to_string(),
+                        BoltType::from(l.leader_second_sig.clone()),
+                    ),
+                    (
+                        "f_sig_1".to_string(),
+                        BoltType::from(l.follower_first_sig.clone()),
+                    ),
+                    (
+                        "f_sig_2".to_string(),
+                        BoltType::from(l.follower_second_sig.clone()),
+                    ),
                     ("gap_1".to_string(), BoltType::from(l.time_gap_on_first_sec)),
-                    ("gap_2".to_string(), BoltType::from(l.time_gap_on_second_sec)),
+                    (
+                        "gap_2".to_string(),
+                        BoltType::from(l.time_gap_on_second_sec),
+                    ),
                 ])
             })
             .collect();
@@ -1624,19 +1663,52 @@ impl LinkGraph {
                     ("leader".to_string(), BoltType::from(l.leader.clone())),
                     ("mint".to_string(), BoltType::from(l.mint.clone())),
                     ("buy_gap".to_string(), BoltType::from(l.time_gap_on_buy_sec)),
-                    ("sell_gap".to_string(), BoltType::from(l.time_gap_on_sell_sec)),
+                    (
+                        "sell_gap".to_string(),
+                        BoltType::from(l.time_gap_on_sell_sec),
+                    ),
                     ("leader_pnl".to_string(), BoltType::from(l.leader_pnl)),
                     ("follower_pnl".to_string(), BoltType::from(l.follower_pnl)),
-                    ("l_buy_sig".to_string(), BoltType::from(l.leader_buy_sig.clone())),
-                    ("l_sell_sig".to_string(), BoltType::from(l.leader_sell_sig.clone())),
-                    ("f_buy_sig".to_string(), BoltType::from(l.follower_buy_sig.clone())),
-                    ("f_sell_sig".to_string(), BoltType::from(l.follower_sell_sig.clone())),
-                    ("l_buy_total".to_string(), BoltType::from(l.leader_buy_total)),
-                    ("l_sell_total".to_string(), BoltType::from(l.leader_sell_total)),
-                    ("f_buy_total".to_string(), BoltType::from(l.follower_buy_total)),
-                    ("f_sell_total".to_string(), BoltType::from(l.follower_sell_total)),
-                    ("f_buy_slip".to_string(), BoltType::from(l.follower_buy_slippage)),
-                    ("f_sell_slip".to_string(), BoltType::from(l.follower_sell_slippage)),
+                    (
+                        "l_buy_sig".to_string(),
+                        BoltType::from(l.leader_buy_sig.clone()),
+                    ),
+                    (
+                        "l_sell_sig".to_string(),
+                        BoltType::from(l.leader_sell_sig.clone()),
+                    ),
+                    (
+                        "f_buy_sig".to_string(),
+                        BoltType::from(l.follower_buy_sig.clone()),
+                    ),
+                    (
+                        "f_sell_sig".to_string(),
+                        BoltType::from(l.follower_sell_sig.clone()),
+                    ),
+                    (
+                        "l_buy_total".to_string(),
+                        BoltType::from(l.leader_buy_total),
+                    ),
+                    (
+                        "l_sell_total".to_string(),
+                        BoltType::from(l.leader_sell_total),
+                    ),
+                    (
+                        "f_buy_total".to_string(),
+                        BoltType::from(l.follower_buy_total),
+                    ),
+                    (
+                        "f_sell_total".to_string(),
+                        BoltType::from(l.follower_sell_total),
+                    ),
+                    (
+                        "f_buy_slip".to_string(),
+                        BoltType::from(l.follower_buy_slippage),
+                    ),
+                    (
+                        "f_sell_slip".to_string(),
+                        BoltType::from(l.follower_sell_slippage),
+                    ),
                     ("timestamp".to_string(), BoltType::from(l.timestamp)),
                 ])
             })
@@ -1681,7 +1753,10 @@ impl LinkGraph {
             .filter_map(|l| {
                 mint_map.get(&l.signature).map(|m| {
                     HashMap::from([
-                        ("creator".to_string(), BoltType::from(m.creator_address.clone())),
+                        (
+                            "creator".to_string(),
+                            BoltType::from(m.creator_address.clone()),
+                        ),
                         ("token".to_string(), BoltType::from(m.mint_address.clone())),
                         ("signature".to_string(), BoltType::from(l.signature.clone())),
                         ("timestamp".to_string(), BoltType::from(l.timestamp)),
@@ -1762,12 +1837,24 @@ impl LinkGraph {
             .filter_map(|l| {
                 lock_map.get(&l.signature).map(|lock_row| {
                     HashMap::from([
-                        ("sender".to_string(), BoltType::from(lock_row.sender.clone())),
-                        ("recipient".to_string(), BoltType::from(lock_row.recipient.clone())),
-                        ("mint".to_string(), BoltType::from(lock_row.mint_address.clone())),
+                        (
+                            "sender".to_string(),
+                            BoltType::from(lock_row.sender.clone()),
+                        ),
+                        (
+                            "recipient".to_string(),
+                            BoltType::from(lock_row.recipient.clone()),
+                        ),
+                        (
+                            "mint".to_string(),
+                            BoltType::from(lock_row.mint_address.clone()),
+                        ),
                         ("signature".to_string(), BoltType::from(l.signature.clone())),
                         ("amount".to_string(), BoltType::from(l.amount)),
-                        ("unlock_ts".to_string(), BoltType::from(l.unlock_timestamp as i64)),
+                        (
+                            "unlock_ts".to_string(),
+                            BoltType::from(l.unlock_timestamp as i64),
+                        ),
                         ("timestamp".to_string(), BoltType::from(l.timestamp)),
                     ])
                 })
@@ -1801,8 +1888,14 @@ impl LinkGraph {
             .filter_map(|l| {
                 burn_map.get(&l.signature).map(|burn_row| {
                     HashMap::from([
-                        ("wallet".to_string(), BoltType::from(burn_row.source.clone())),
-                        ("token".to_string(), BoltType::from(burn_row.mint_address.clone())),
+                        (
+                            "wallet".to_string(),
+                            BoltType::from(burn_row.source.clone()),
+                        ),
+                        (
+                            "token".to_string(),
+                            BoltType::from(burn_row.mint_address.clone()),
+                        ),
                         ("signature".to_string(), BoltType::from(l.signature.clone())),
                         ("amount".to_string(), BoltType::from(l.amount)),
                         ("timestamp".to_string(), BoltType::from(l.timestamp)),
@@ -1836,7 +1929,10 @@ impl LinkGraph {
                     ("wallet".to_string(), BoltType::from(l.wallet.clone())),
                     ("token".to_string(), BoltType::from(l.token.clone())),
                     ("signature".to_string(), BoltType::from(l.signature.clone())),
-                    ("pool_address".to_string(), BoltType::from(l.pool_address.clone())),
+                    (
+                        "pool_address".to_string(),
+                        BoltType::from(l.pool_address.clone()),
+                    ),
                     ("amount_base".to_string(), BoltType::from(l.amount_base)),
                     ("amount_quote".to_string(), BoltType::from(l.amount_quote)),
                     ("timestamp".to_string(), BoltType::from(l.timestamp)),
@@ -1867,8 +1963,14 @@ impl LinkGraph {
                     ("wallet".to_string(), BoltType::from(l.wallet.clone())),
                     ("token".to_string(), BoltType::from(l.token.clone())),
                     // Add new params
-                    ("pnl_at_creation".to_string(), BoltType::from(l.pnl_at_creation)),
-                    ("ath_at_creation".to_string(), BoltType::from(l.ath_usd_at_creation)),
+                    (
+                        "pnl_at_creation".to_string(),
+                        BoltType::from(l.pnl_at_creation),
+                    ),
+                    (
+                        "ath_at_creation".to_string(),
+                        BoltType::from(l.ath_usd_at_creation),
+                    ),
                     ("timestamp".to_string(), BoltType::from(l.timestamp)),
                 ])
             })
@@ -1900,8 +2002,14 @@ impl LinkGraph {
                     ("wallet".to_string(), BoltType::from(l.wallet.clone())),
                     ("token".to_string(), BoltType::from(l.token.clone())),
                     // Add new params
-                    ("pct_at_creation".to_string(), BoltType::from(l.holding_pct_at_creation)),
-                    ("ath_at_creation".to_string(), BoltType::from(l.ath_usd_at_creation)),
+                    (
+                        "pct_at_creation".to_string(),
+                        BoltType::from(l.holding_pct_at_creation),
+                    ),
+                    (
+                        "ath_at_creation".to_string(),
+                        BoltType::from(l.ath_usd_at_creation),
+                    ),
                     ("timestamp".to_string(), BoltType::from(l.timestamp)),
                 ])
             })
