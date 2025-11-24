@@ -510,6 +510,9 @@ async fn redis_publisher_service(
             }
         }
     }
+    // Channel closed: this is fatal because upstream is gone; exit to avoid silent data loss.
+    eprintln!("[Redis Publisher] 🔴 Input channel closed. Exiting.");
+    std::process::exit(1);
     Ok(())
 }
 

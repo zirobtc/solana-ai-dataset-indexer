@@ -15,7 +15,7 @@ use futures::stream::{self, StreamExt};
 use itertools::Itertools;
 use neo4rs::{BoltType, Graph, query};
 use once_cell::sync::Lazy;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use serde::Deserialize;
 use solana_sdk::native_token::LAMPORTS_PER_SOL;
@@ -98,6 +98,7 @@ pub struct LinkGraph {
     neo4j_client: Arc<Graph>,
     rx: mpsc::Receiver<EventPayload>,
     link_graph_depth: Arc<AtomicUsize>,
+    write_lock: Mutex<()>,
 }
 
 #[derive(Row, Deserialize, Debug)]
@@ -124,6 +125,7 @@ impl LinkGraph {
             neo4j_client,
             rx,
             link_graph_depth,
+            write_lock: Mutex::new(()),
         })
     }
 
@@ -155,7 +157,10 @@ impl LinkGraph {
                                 if !message_buffer.is_empty() {
                                     message_buffer.sort_by_key(|p| p.timestamp);
                                     let batch = std::mem::take(&mut message_buffer);
-                                    self.process_batch(batch).await?;
+                                    if let Err(e) = self.process_batch_with_retry(batch).await {
+                                        eprintln!("[LinkGraph] 🔴 Fatal processing window: {}", e);
+                                        std::process::exit(1);
+                                    }
                                 }
                                 current_window_start = Some(payload.timestamp);
                                 window_opened_at = Some(Instant::now());
@@ -163,12 +168,16 @@ impl LinkGraph {
                             }
                         }
                         None => {
+                            eprintln!("[LinkGraph] 🔴 Input channel closed. Exiting.");
                             if !message_buffer.is_empty() {
                                 message_buffer.sort_by_key(|p| p.timestamp);
                                 let batch = std::mem::take(&mut message_buffer);
-                                self.process_batch(batch).await?;
+                                if let Err(e) = self.process_batch_with_retry(batch).await {
+                                    eprintln!("[LinkGraph] 🔴 Fatal processing final window: {}", e);
+                                }
                             }
-                            break;
+                            // Fatal: the producer is gone. Exit so it's obvious.
+                            std::process::exit(1);
                         }
                     }
                 }
@@ -178,7 +187,10 @@ impl LinkGraph {
                             if opened.elapsed() >= Duration::from_millis(cfg.window_max_wait_ms) {
                                 message_buffer.sort_by_key(|p| p.timestamp);
                                 let batch = std::mem::take(&mut message_buffer);
-                                self.process_batch(batch).await?;
+                                if let Err(e) = self.process_batch_with_retry(batch).await {
+                                    eprintln!("[LinkGraph] 🔴 Fatal processing timed window: {}", e);
+                                    std::process::exit(1);
+                                }
                                 current_window_start = None;
                                 window_opened_at = None;
                             }
@@ -270,7 +282,8 @@ impl LinkGraph {
         // Payloads are already a complete time-window. We just need to sort them.
         payloads.sort_by_key(|p| p.timestamp);
 
-        // Process the entire batch as a single logical unit.
+        // Process the entire batch as a single logical unit with a per-worker write lock.
+        let _guard = self.write_lock.lock().await;
         self.process_time_window(&payloads).await?;
 
         println!(
@@ -278,6 +291,31 @@ impl LinkGraph {
             payloads.len()
         );
         Ok(())
+    }
+
+    async fn process_batch_with_retry(&self, payloads: Vec<EventPayload>) -> Result<()> {
+        let mut attempts = 0;
+        let max_retries = 3;
+        loop {
+            match self.process_batch(payloads.clone()).await {
+                Ok(_) => return Ok(()),
+                Err(e) => {
+                    let err_str = e.to_string();
+                    if err_str.contains("DeadlockDetected") && attempts < max_retries {
+                        attempts += 1;
+                        let backoff_ms = 200 * attempts;
+                        eprintln!(
+                            "[LinkGraph] ⚠️ Deadlock detected, retrying {}/{} after {}ms",
+                            attempts, max_retries, backoff_ms
+                        );
+                        sleep(Duration::from_millis(backoff_ms as u64)).await;
+                        continue;
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+        }
     }
 
     // --- Main Logic for Pattern Detection ---

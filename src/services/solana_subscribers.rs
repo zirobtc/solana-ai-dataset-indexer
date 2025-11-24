@@ -103,8 +103,8 @@ async fn send_with_backpressure_wait<T: Send>(
                 return true;
             }
             Ok(Err(_)) => {
-                eprintln!("{} Receiver dropped. Shutting down sender loop.", label);
-                return false;
+                eprintln!("{} Receiver dropped. Fatal: exiting.", label);
+                std::process::exit(1);
             }
             Err(_) => {
                 eprintln!(

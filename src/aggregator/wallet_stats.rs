@@ -172,7 +172,8 @@ impl WalletAggregator {
                                 "[walletAggregator] 🔴 Failed to forward payload to LinkGraph channel (shard {}): {}",
                                 shard, e
                             );
-                            break;
+                            // This is fatal: downstream is gone. Exit immediately so the issue is visible.
+                            std::process::exit(1);
                         } else {
                             self.link_graph_depths[shard].fetch_add(1, Ordering::Relaxed);
                         }
