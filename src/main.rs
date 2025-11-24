@@ -519,7 +519,7 @@ async fn redis_publisher_service(
 async fn redis_queue_monitor(
     redis_client: RedisClient,
     link_graph_depths: Vec<Arc<AtomicUsize>>,
-    writer_depths: Vec<Arc<AtomicUsize>>,
+    writer_depth: Arc<AtomicUsize>,
     tx_receiver: Arc<Mutex<mpsc::Receiver<UnifiedTransaction<'static>>>>,
 ) -> Result<()> {
     let mut conn = redis_client.get_multiplexed_async_connection().await?;
@@ -541,10 +541,7 @@ async fn redis_queue_monitor(
             .iter()
             .map(|d| d.load(Ordering::Relaxed))
             .sum();
-        let writer_len: usize = writer_depths
-            .iter()
-            .map(|d| d.load(Ordering::Relaxed))
-            .sum();
+        let writer_len: usize = writer_depth.load(Ordering::Relaxed);
         let tx_len = match tx_receiver.try_lock() {
             Ok(rx) => rx.len(),
             Err(_) => {
@@ -635,9 +632,14 @@ async fn main() -> Result<()> {
     );
     let (tx_sender, tx_receiver) = mpsc::channel(tx_channel_capacity);
     let (event_sender, event_receiver) = mpsc::channel::<EventPayload>(event_channel_capacity);
-    let link_graph_channel_capacity = channel_capacity_from_env("LINK_GRAPH_CHANNEL_CAPACITY", 4096);
+    let link_graph_channel_capacity =
+        channel_capacity_from_env("LINK_GRAPH_CHANNEL_CAPACITY", 4096);
     let link_graph_workers = channel_capacity_from_env("LINK_GRAPH_WORKERS", 1);
-    let mut link_graph_writer_depths = Vec::with_capacity(link_graph_workers);
+    let writer_channel_capacity =
+        channel_capacity_from_env("LINK_GRAPH_WRITER_CHANNEL_CAPACITY", 20_000);
+    let (link_graph_write_sender, link_graph_write_receiver) =
+        mpsc::channel(writer_channel_capacity);
+    let link_graph_writer_depth = Arc::new(AtomicUsize::new(0));
     let mut link_graph_senders = Vec::with_capacity(link_graph_workers);
     let mut link_graph_receivers = Vec::with_capacity(link_graph_workers);
     let mut link_graph_depths = Vec::with_capacity(link_graph_workers);
@@ -646,7 +648,6 @@ async fn main() -> Result<()> {
         link_graph_senders.push(tx);
         link_graph_receivers.push(rx);
         link_graph_depths.push(Arc::new(AtomicUsize::new(0)));
-        link_graph_writer_depths.push(Arc::new(AtomicUsize::new(0)));
     }
     let shared_tx_receiver = Arc::new(Mutex::new(tx_receiver));
 
@@ -658,12 +659,12 @@ async fn main() -> Result<()> {
 
     let monitor_redis_client = redis_client.clone();
     let monitor_depths = link_graph_depths.clone();
-    let monitor_writer_depths = link_graph_writer_depths.clone();
+    let monitor_writer_depth = link_graph_writer_depth.clone();
     let monitor_tx_receiver = shared_tx_receiver.clone();
     let monitor_task = tokio::spawn(redis_queue_monitor(
         monitor_redis_client,
         monitor_depths,
-        monitor_writer_depths,
+        monitor_writer_depth,
         monitor_tx_receiver,
     ));
     tasks.push(monitor_task);
@@ -794,6 +795,17 @@ async fn main() -> Result<()> {
 
     // Spawn transaction processor workers
     let tx_processor_workers = channel_capacity_from_env("TX_PROCESSOR_WORKERS", 2);
+    // Spawn single global link-graph writer
+    {
+        let writer_client = Arc::clone(&neo4j_client);
+        let writer_depth = link_graph_writer_depth.clone();
+        let writer_rx = link_graph_write_receiver;
+        let writer_task = tokio::spawn(async move {
+            link_graph::LinkGraph::writer_task(writer_rx, writer_client, writer_depth).await;
+            Result::<()>::Ok(())
+        });
+        tasks.push(writer_task);
+    }
     for worker_id in 0..tx_processor_workers {
         // Recreate handlers per worker
         let protocol_handlers: Vec<Box<dyn TransactionHandler>> = vec![
@@ -871,13 +883,15 @@ async fn main() -> Result<()> {
         let graph_neo4j_client = Arc::clone(&neo4j_client);
         let graph_db_client = db_client.clone();
         let graph_depth = link_graph_depths[worker_id % link_graph_depths.len()].clone();
-        let writer_depth = link_graph_writer_depths[worker_id % link_graph_writer_depths.len()].clone();
+        let writer_depth = link_graph_writer_depth.clone();
+        let write_sender = link_graph_write_sender.clone();
         let handle = tokio::spawn(async move {
             match LinkGraph::new(
                 graph_db_client,
                 graph_neo4j_client,
                 graph_rx,
                 graph_depth,
+                write_sender,
                 writer_depth,
             )
             .await

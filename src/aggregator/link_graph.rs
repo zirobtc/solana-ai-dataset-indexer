@@ -157,19 +157,12 @@ impl LinkGraph {
         neo4j_client: Arc<Graph>,
         rx: mpsc::Receiver<EventPayload>,
         link_graph_depth: Arc<AtomicUsize>,
+        write_sender: mpsc::Sender<WriteJob>,
         writer_depth: Arc<AtomicUsize>,
     ) -> Result<Self> {
-        let cfg = &*LINK_GRAPH_CONFIG;
         let _: Ping = db_client.query("SELECT 1 as alive").fetch_one().await?;
         neo4j_client.run(query("MATCH (n) RETURN count(n)")).await?;
         println!("[WalletGraph] ✔️ Connected to ClickHouse, Neo4j. Listening on channel.");
-        let (write_sender, write_receiver) =
-            mpsc::channel::<WriteJob>(cfg.writer_channel_capacity);
-        let writer_client = Arc::clone(&neo4j_client);
-        let writer_depth_clone = writer_depth.clone();
-        tokio::spawn(async move {
-            LinkGraph::writer_task(write_receiver, writer_client, writer_depth_clone).await;
-        });
         Ok(Self {
             db_client,
             neo4j_client,
@@ -492,7 +485,7 @@ impl LinkGraph {
         }
     }
 
-    async fn writer_task(
+    pub async fn writer_task(
         mut rx: mpsc::Receiver<WriteJob>,
         neo4j_client: Arc<Graph>,
         writer_depth: Arc<AtomicUsize>,
@@ -1457,13 +1450,15 @@ impl LinkGraph {
         for chunk in wallet_vec.chunks(cfg.chunk_size_large) {
             let params: Vec<_> = chunk
                 .iter()
-                .map(|addr| HashMap::from([("address", BoltType::from(addr.clone()))]))
+                .map(|addr| HashMap::from([("address".to_string(), BoltType::from(addr.clone()))]))
                 .collect();
 
-            let q = query("UNWIND $wallets as wallet MERGE (w:Wallet {address: wallet.address})")
-                .param("wallets", params);
+            let cypher = "
+                UNWIND $wallets as wallet
+                MERGE (w:Wallet {address: wallet.address})
+            ";
 
-                self.neo4j_client.run(q).await?;
+            self.enqueue_write(cypher, params).await?;
         }
         Ok(())
     }
@@ -1481,13 +1476,16 @@ impl LinkGraph {
         for chunk in token_vec.chunks(cfg.chunk_size_large) {
             let params: Vec<_> = chunk
                 .iter()
-                .map(|addr| HashMap::from([("address", BoltType::from(addr.clone()))]))
+                .map(|addr| HashMap::from([("address".to_string(), BoltType::from(addr.clone()))]))
                 .collect();
 
-            let q = query("UNWIND $tokens as token MERGE (t:Token {address: token.address}) ON CREATE SET t.created_ts = token.created_ts")
-                .param("tokens", params);
+            let cypher = "
+                UNWIND $tokens as token
+                MERGE (t:Token {address: token.address})
+                ON CREATE SET t.created_ts = token.created_ts
+            ";
 
-                self.neo4j_client.run(q).await?;
+            self.enqueue_write(cypher, params).await?;
         }
         Ok(())
     }
