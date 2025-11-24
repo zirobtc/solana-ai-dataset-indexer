@@ -15,9 +15,8 @@ use futures::stream::{self, StreamExt};
 use itertools::Itertools;
 use neo4rs::{BoltType, Graph, query};
 use once_cell::sync::Lazy;
-use redis::FromRedisValue;
-use redis::streams::{StreamReadOptions, StreamReadReply};
-use redis::{AsyncCommands, Client as RedisClient, aio::MultiplexedConnection};
+use tokio::sync::mpsc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use serde::Deserialize;
 use solana_sdk::native_token::LAMPORTS_PER_SOL;
 use std::collections::{HashMap, HashSet};
@@ -25,7 +24,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
-use tokio::time::Instant;
+use tokio::time::{Instant, MissedTickBehavior, interval};
 use tokio::time::sleep;
 use tokio::try_join;
 
@@ -39,26 +38,20 @@ fn decimals_for_quote(mint: &str) -> u8 {
     }
 }
 
-static LINK_GRAPH_DLQ_STREAM: Lazy<String> = Lazy::new(|| {
-    std::env::var("LINK_GRAPH_DLQ_STREAM").unwrap_or_else(|_| "link_graph_dlq".to_string())
-});
-
 // Serialize Neo4j writes when multiple LinkGraph workers are running.
 static NEO4J_WRITE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 #[derive(Debug)]
 struct LinkGraphConfig {
     time_window_seconds: u32,
-    queue_threshold: i64,
     copied_trade_window_seconds: i64,
     sniper_rank_threshold: u64,
     whale_rank_threshold: u64,
     min_top_trader_pnl: f32,
     min_trade_total_usd: f64,
     ath_price_threshold_usd: f64,
-    redis_read_count: usize,
-    redis_block_ms: u64,
-    redis_drain_threshold: i64,
+    window_max_wait_ms: u64,
+    late_slack_ms: u64,
     chunk_size_large: usize,
     chunk_size_historical: usize,
     chunk_size_mint_small: usize,
@@ -68,16 +61,14 @@ struct LinkGraphConfig {
 
 static LINK_GRAPH_CONFIG: Lazy<LinkGraphConfig> = Lazy::new(|| LinkGraphConfig {
     time_window_seconds: env_parse("LINK_GRAPH_TIME_WINDOW_SECONDS", 120_u32),
-    queue_threshold: env_parse("LINK_GRAPH_QUEUE_THRESHOLD", 40_000_i64),
     copied_trade_window_seconds: env_parse("LINK_GRAPH_COPIED_TRADE_WINDOW_SECONDS", 60_i64),
     sniper_rank_threshold: env_parse("LINK_GRAPH_SNIPER_RANK_THRESHOLD", 45_u64),
     whale_rank_threshold: env_parse("LINK_GRAPH_WHALE_RANK_THRESHOLD", 5_u64),
     min_top_trader_pnl: env_parse("LINK_GRAPH_MIN_TOP_TRADER_PNL", 1.0_f32),
     min_trade_total_usd: env_parse("LINK_GRAPH_MIN_TRADE_TOTAL_USD", 20.0_f64),
     ath_price_threshold_usd: env_parse("LINK_GRAPH_ATH_PRICE_THRESHOLD_USD", 0.0002000_f64),
-    redis_read_count: env_parse("LINK_GRAPH_REDIS_READ_COUNT", 5000_usize),
-    redis_block_ms: env_parse("LINK_GRAPH_REDIS_BLOCK_MS", 100_u64),
-    redis_drain_threshold: env_parse("LINK_GRAPH_REDIS_DRAIN_THRESHOLD", 5000_i64),
+    window_max_wait_ms: env_parse("LINK_GRAPH_WINDOW_MAX_WAIT_MS", 250_u64),
+    late_slack_ms: env_parse("LINK_GRAPH_LATE_SLACK_MS", 2000_u64),
     chunk_size_large: env_parse("LINK_GRAPH_CHUNK_SIZE_LARGE", 3000_usize),
     chunk_size_historical: env_parse("LINK_GRAPH_CHUNK_SIZE_HISTORICAL", 1000_usize),
     chunk_size_mint_small: env_parse("LINK_GRAPH_CHUNK_SIZE_MINT_SMALL", 1500_usize),
@@ -109,7 +100,8 @@ enum FollowerLink {
 pub struct LinkGraph {
     db_client: Client,
     neo4j_client: Arc<Graph>,
-    redis_conn: MultiplexedConnection,
+    rx: Arc<Mutex<mpsc::Receiver<EventPayload>>>,
+    link_graph_depth: Arc<AtomicUsize>,
 }
 
 #[derive(Row, Deserialize, Debug)]
@@ -125,274 +117,89 @@ impl LinkGraph {
     pub async fn new(
         db_client: Client,
         neo4j_client: Arc<Graph>,
-        redis_client: RedisClient,
+        rx: Arc<Mutex<mpsc::Receiver<EventPayload>>>,
+        link_graph_depth: Arc<AtomicUsize>,
     ) -> Result<Self> {
         let _: Ping = db_client.query("SELECT 1 as alive").fetch_one().await?;
         neo4j_client.run(query("MATCH (n) RETURN count(n)")).await?;
-        let redis_conn = redis_client.get_multiplexed_async_connection().await?;
-        println!("[WalletGraph] ✔️ Connected to ClickHouse, Neo4j, and Redis.");
+        println!("[WalletGraph] ✔️ Connected to ClickHouse, Neo4j. Listening on channel.");
         Ok(Self {
             db_client,
             neo4j_client,
-            redis_conn,
+            rx,
+            link_graph_depth,
         })
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        let stream_key = "link_graph_queue";
-        let group_name = "link_graph_analyzers";
-        let consumer_name = format!("consumer-{}", uuid::Uuid::new_v4());
-
-        let result: redis::RedisResult<()> = self
-            .redis_conn
-            .xgroup_create_mkstream(stream_key, group_name, "0")
-            .await;
-
-        if let Err(e) = result {
-            if !e.to_string().contains("BUSYGROUP") {
-                return Err(anyhow!(
-                    "Failed to create or connect to consumer group: {}",
-                    e
-                ));
-            }
-            println!(
-                "[LinkGraph] Consumer group '{}' already exists. Resuming.",
-                group_name
-            );
-        } else {
-            println!(
-                "[LinkGraph] Created new consumer group '{}' on stream '{}'.",
-                group_name, stream_key
-            );
-        }
-
-        let mut message_buffer: Vec<(String, EventPayload)> = Vec::new();
         let cfg = &*LINK_GRAPH_CONFIG;
+        let mut message_buffer: Vec<EventPayload> = Vec::new();
+        let mut current_window_start: Option<u32> = None;
+        let mut window_opened_at: Option<Instant> = None;
+        let mut flush_check = interval(Duration::from_millis(cfg.window_max_wait_ms.max(50)));
+        flush_check.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let late_slack_secs: u32 = (cfg.late_slack_ms / 1000) as u32;
 
         loop {
-            let queue_len: i64 = self.redis_conn.xlen(stream_key).await.unwrap_or(0);
-            if queue_len < cfg.queue_threshold {
-                println!(
-                    "[LinkGraph] Queue size ({}) is below threshold ({}). Waiting...",
-                    queue_len, cfg.queue_threshold
-                );
-                tokio::time::sleep(Duration::from_secs(15)).await;
-                continue;
-            }
-
-            // --- CORRECTED COLLECTION PHASE ---
-            loop {
-                // First, check if the buffer we already have contains a full window.
-                if !message_buffer.is_empty() {
-                    // Ensure buffer is sorted before checking timestamps
-                    message_buffer.sort_by_key(|(_, p)| p.timestamp);
-                    let first_ts = message_buffer.first().unwrap().1.timestamp;
-                    let last_ts = message_buffer.last().unwrap().1.timestamp;
-                    // If the duration is sufficient, break to process it.
-                    if last_ts >= first_ts + cfg.time_window_seconds {
-                        break;
-                    }
-                }
-
-                // If the window is not yet full, fetch more messages.
-                let new_messages = collect_events_from_stream(
-                    &self.redis_conn,
-                    stream_key,
-                    group_name,
-                    &consumer_name,
-                )
-                .await?;
-
-                // =========================================================================
-                // >> THE CRITICAL FIX <<
-                // If Redis returns nothing, we DON'T break. We just loop again,
-                // which will either re-check the buffer or wait if the queue is drained.
-                // This prevents processing incomplete windows.
-                // =========================================================================
-                if new_messages.is_empty() {
-                    // If the stream is truly empty and our buffer is still not full,
-                    // it means we've reached the end of the data stream. We should process what we have.
-                    if queue_len < cfg.redis_drain_threshold {
-                        // Check against the Redis read size
-                        println!("[LinkGraph] Stream is draining. Processing final partial batch.");
-                        break;
-                    }
-                    // Otherwise, just wait briefly to avoid busy-looping on a fast stream.
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    continue;
-                }
-
-                message_buffer.extend(new_messages);
-            }
-
-            if message_buffer.is_empty() {
-                continue;
-            }
-
-            // --- PARTITIONING PHASE ---
-            message_buffer.sort_by_key(|(_, p)| p.timestamp);
-            let window_start_ts = message_buffer.first().unwrap().1.timestamp;
-
-            let split_index = message_buffer
-                .partition_point(|(_, p)| p.timestamp < window_start_ts + cfg.time_window_seconds);
-
-            // Enforce a minimum batch size; collect more if below threshold.
-            if split_index < cfg.queue_threshold as usize {
-                println!(
-                    "[LinkGraph] [Debug] Window size {} below min threshold {}. Collecting more...",
-                    split_index, cfg.queue_threshold
-                );
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                continue;
-            }
-
-            let messages_to_process = message_buffer.drain(..split_index).collect::<Vec<_>>();
-            let (window_message_ids, window_payloads): (Vec<_>, Vec<_>) =
-                messages_to_process.into_iter().unzip();
-
-            // --- PROCESSING PHASE ---
-            let payload_count = window_payloads.len();
-            if payload_count == 0 {
-                continue;
-            }
-
-            if payload_count < 100 {
-                let queue_len_now: i64 = self.redis_conn.xlen(stream_key).await.unwrap_or(-1);
-                println!(
-                    "[LinkGraph] [Debug] Small window: {} events, buffer_remaining={}, queue_len={}",
-                    payload_count,
-                    message_buffer.len(),
-                    queue_len_now
-                );
-            }
-
-            let first_ts = window_payloads.first().map_or(0, |p| p.timestamp);
-            let last_ts = window_payloads.last().map_or(0, |p| p.timestamp);
-            let on_chain_duration_secs = if last_ts > first_ts {
-                last_ts - first_ts
-            } else {
-                0
-            };
-
-            let batch_start_time = Instant::now();
-            println!(
-                "[LinkGraph] ⚙️ Processing window of {} events (covering {}s on-chain)...",
-                payload_count, on_chain_duration_secs
-            );
-
-            let mut attempts = 0;
-            let max_retries = 3;
-            let mut handled = false;
-            while attempts <= max_retries {
-                match self.process_batch(window_payloads.clone()).await {
-                    Ok(_) => {
-                        let result: redis::RedisResult<i64> = self
-                            .redis_conn
-                            .xack(stream_key, group_name, &window_message_ids)
-                            .await;
-                        if let Err(e) = result {
-                            eprintln!("[LinkGraph] 🔴 FAILED to acknowledge messages: {}", e);
-                        } else if let Err(e) = self
-                            .redis_conn
-                            .xdel::<_, _, i64>(stream_key, &window_message_ids)
-                            .await
-                        {
-                            eprintln!("[LinkGraph] 🔴 FAILED to delete messages: {}", e);
-                        }
-                        handled = true;
-                        break;
-                    }
-                    Err(e) => {
-                        let err_str = e.to_string();
-                        if err_str.contains("DeadlockDetected") && attempts < max_retries {
-                            attempts += 1;
-                            let backoff_ms = 200 * attempts;
-                            eprintln!(
-                                "[LinkGraph] ⚠️ Deadlock detected, retrying {}/{} after {}ms",
-                                attempts, max_retries, backoff_ms
-                            );
-                            sleep(Duration::from_millis(backoff_ms as u64)).await;
-                            continue;
-                        } else {
-                            eprintln!(
-                                "[LinkGraph] ❌ Failed to process batch (no ACK). Error: {}",
-                                err_str
-                            );
-                            // Attempt to move to DLQ to avoid blocking the stream.
-                            let mut conn = self.redis_conn.clone();
-                            let mut dlq_ok = true;
-                            for payload in window_payloads.iter() {
-                                match bincode::serialize(payload) {
-                                    Ok(data) => {
-                                        if let Err(dlq_err) = conn
-                                            .xadd::<_, _, _, _, ()>(
-                                                &*LINK_GRAPH_DLQ_STREAM,
-                                                "*",
-                                                &[("payload", data)],
-                                            )
-                                            .await
-                                        {
-                                            eprintln!(
-                                                "[LinkGraph] 🔴 Failed to write to DLQ: {}",
-                                                dlq_err
-                                            );
-                                            dlq_ok = false;
-                                            break;
-                                        }
-                                    }
-                                    Err(se) => {
-                                        eprintln!(
-                                            "[LinkGraph] 🔴 Failed to serialize payload for DLQ: {}",
-                                            se
-                                        );
-                                        dlq_ok = false;
-                                        break;
-                                    }
-                                }
+            tokio::select! {
+                maybe_payload = async {
+                    let mut guard = self.rx.lock().await;
+                    guard.recv().await
+                } => {
+                    match maybe_payload {
+                        Some(payload) => {
+                            // one item left the channel
+                            self.link_graph_depth.fetch_sub(1, Ordering::Relaxed);
+                            if current_window_start.is_none() {
+                                current_window_start = Some(payload.timestamp);
+                                window_opened_at = Some(Instant::now());
                             }
-                            if dlq_ok {
-                                let result: redis::RedisResult<i64> = self
-                                    .redis_conn
-                                    .xack(stream_key, group_name, &window_message_ids)
-                                    .await;
-                                if let Err(e) = result {
-                                    eprintln!(
-                                        "[LinkGraph] 🔴 FAILED to acknowledge messages after DLQ: {}",
-                                        e
-                                    );
-                                } else if let Err(e) = self
-                                    .redis_conn
-                                    .xdel::<_, _, i64>(stream_key, &window_message_ids)
-                                    .await
-                                {
-                                    eprintln!(
-                                        "[LinkGraph] 🔴 FAILED to delete messages after DLQ: {}",
-                                        e
-                                    );
+
+                            let window_end = current_window_start.unwrap() + cfg.time_window_seconds;
+                            if payload.timestamp <= window_end + late_slack_secs {
+                                message_buffer.push(payload);
+                            } else {
+                                if !message_buffer.is_empty() {
+                                    message_buffer.sort_by_key(|p| p.timestamp);
+                                    let batch = std::mem::take(&mut message_buffer);
+                                    self.process_batch(batch).await?;
                                 }
-                                handled = true;
+                                current_window_start = Some(payload.timestamp);
+                                window_opened_at = Some(Instant::now());
+                                message_buffer.push(payload);
+                            }
+                        }
+                        None => {
+                            if !message_buffer.is_empty() {
+                                message_buffer.sort_by_key(|p| p.timestamp);
+                                let batch = std::mem::take(&mut message_buffer);
+                                self.process_batch(batch).await?;
                             }
                             break;
                         }
                     }
                 }
-            }
-            if !handled {
-                eprintln!("[LinkGraph] ⚠️ Batch left pending due to repeated failures.");
-            }
-
-            let elapsed_secs = batch_start_time.elapsed().as_secs_f64();
-            if elapsed_secs > 0.0 {
-                let eps = payload_count as f64 / elapsed_secs;
-                println!(
-                    "[LinkGraph] ⏱️ Batch processed in {:.2}s ({:.2} events/sec).",
-                    elapsed_secs, eps
-                );
+                _ = flush_check.tick() => {
+                    if !message_buffer.is_empty() {
+                        if let Some(opened) = window_opened_at {
+                            if opened.elapsed() >= Duration::from_millis(cfg.window_max_wait_ms) {
+                                message_buffer.sort_by_key(|p| p.timestamp);
+                                let batch = std::mem::take(&mut message_buffer);
+                                self.process_batch(batch).await?;
+                                current_window_start = None;
+                                window_opened_at = None;
+                            }
+                        }
+                    }
+                }
             }
         }
+
+        Ok(())
     }
 
-    async fn process_time_window(&self, payloads: &[EventPayload]) -> Result<()> {
+    async fn process_time_window
+(&self, payloads: &[EventPayload]) -> Result<()> {
         let cfg = &*LINK_GRAPH_CONFIG;
         let mut unique_wallets = HashSet::new();
         let mut unique_tokens = HashSet::new();
@@ -1980,36 +1787,4 @@ impl LinkGraph {
         // Cast to f64 for the return type
         Ok(pnl_f32 as f64)
     }
-}
-
-async fn collect_events_from_stream(
-    redis_conn: &MultiplexedConnection,
-    stream_key: &str,
-    group_name: &str,
-    consumer_name: &str,
-) -> Result<Vec<(String, EventPayload)>> {
-    let cfg = &*LINK_GRAPH_CONFIG;
-    let mut conn = redis_conn.clone();
-    // Fetch up to 5000 messages at a time.
-    // Block for a very short period to avoid busy-looping if the stream is empty, but remain responsive.
-    let opts = StreamReadOptions::default()
-        .group(group_name, consumer_name)
-        .count(cfg.redis_read_count)
-        .block(cfg.redis_block_ms as usize); // Block for max N ms
-
-    let reply: StreamReadReply = conn.xread_options(&[stream_key], &[">"], &opts).await?;
-
-    let mut events = Vec::new();
-    for stream_entry in reply.keys {
-        for message in stream_entry.ids {
-            if let Some(payload_value) = message.map.get("payload") {
-                if let Ok(payload_bytes) = Vec::<u8>::from_redis_value(payload_value) {
-                    if let Ok(payload) = bincode::deserialize::<EventPayload>(&payload_bytes) {
-                        events.push((message.id.clone(), payload));
-                    }
-                }
-            }
-        }
-    }
-    Ok(events)
 }

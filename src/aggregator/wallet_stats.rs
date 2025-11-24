@@ -18,6 +18,8 @@ use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
 use std::str::FromStr;
 use std::time::Duration;
+use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+use tokio::sync::mpsc;
 
 type ProfileCache = HashMap<String, WalletProfileEntry>;
 type HoldingsCache = HashMap<(String, String), WalletHoldingRow>;
@@ -59,6 +61,8 @@ pub struct WalletAggregator {
     db_client: Client,
     redis_conn: MultiplexedConnection,
     price_service: PriceService,
+    link_graph_sender: mpsc::Sender<EventPayload>,
+    link_graph_depth: Arc<AtomicUsize>,
 }
 
 impl WalletAggregator {
@@ -66,12 +70,16 @@ impl WalletAggregator {
         db_client: Client,
         redis_client: RedisClient,
         price_service: PriceService,
+        link_graph_sender: mpsc::Sender<EventPayload>,
+        link_graph_depth: Arc<AtomicUsize>,
     ) -> Result<Self> {
         let redis_conn = redis_client.get_multiplexed_async_connection().await?;
         Ok(Self {
             db_client,
             redis_conn,
             price_service,
+            link_graph_sender,
+            link_graph_depth,
         })
     }
 
@@ -107,10 +115,6 @@ impl WalletAggregator {
                 group_name, stream_key
             );
         }
-
-        // --- Setup for the publisher ---
-        let mut publisher_conn = self.redis_conn.clone();
-        let link_graph_queue = "link_graph_queue";
 
         loop {
             // Fetch a batch using the new stream-based function
@@ -148,12 +152,19 @@ impl WalletAggregator {
                     println!(
                         "[walletAggregator] ✅ Batch processed successfully. Forwarding to LinkGraph."
                     );
-                    // Forward to the next queue
-                    for payload in payloads {
-                        let payload_data = bincode::serialize(&payload)?;
-                        let _: () = publisher_conn
-                            .xadd(link_graph_queue, "*", &[("payload", payload_data)])
-                            .await?;
+                    // Forward to the next stage via channel (sorted for stability)
+                    let mut sorted_payloads = payloads;
+                    sorted_payloads.sort_by_key(|p| p.timestamp);
+                    for payload in sorted_payloads {
+                        if let Err(e) = self.link_graph_sender.send(payload).await {
+                            eprintln!(
+                                "[walletAggregator] 🔴 Failed to forward payload to LinkGraph channel: {}",
+                                e
+                            );
+                            break;
+                        } else {
+                            self.link_graph_depth.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                     // IMPORTANT: Acknowledge the messages from the source queue
                     if !message_ids.is_empty() {

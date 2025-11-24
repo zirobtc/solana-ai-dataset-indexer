@@ -27,7 +27,7 @@ use redis::{AsyncCommands, streams::StreamMaxlen};
 use std::{
     collections::HashMap,
     env,
-    sync::Arc,
+    sync::{Arc, atomic::{AtomicUsize, Ordering}},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     vec,
 };
@@ -513,12 +513,12 @@ async fn redis_publisher_service(
     Ok(())
 }
 
-async fn redis_queue_monitor(redis_client: RedisClient) -> Result<()> {
+async fn redis_queue_monitor(redis_client: RedisClient, link_graph_depth: Arc<AtomicUsize>) -> Result<()> {
     let mut conn = redis_client.get_multiplexed_async_connection().await?;
     let mut ticker = interval(Duration::from_secs(30));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-    let queues = vec!["event_queue", "wallet_agg_queue", "link_graph_queue"];
+    let queues = vec!["event_queue", "wallet_agg_queue"];
 
     loop {
         ticker.tick().await;
@@ -529,6 +529,8 @@ async fn redis_queue_monitor(redis_client: RedisClient) -> Result<()> {
                 Err(e) => sizes.push(format!("{}=err({})", key, e)),
             }
         }
+        let link_graph_len = link_graph_depth.load(Ordering::Relaxed);
+        sizes.push(format!("link_graph_channel={}", link_graph_len));
         println!("[RedisMonitor] Queue sizes: {}", sizes.join(", "));
     }
 }
@@ -603,6 +605,10 @@ async fn main() -> Result<()> {
     );
     let (tx_sender, tx_receiver) = mpsc::channel(tx_channel_capacity);
     let (event_sender, event_receiver) = mpsc::channel::<EventPayload>(event_channel_capacity);
+    let link_graph_channel_capacity = channel_capacity_from_env("LINK_GRAPH_CHANNEL_CAPACITY", 4096);
+    let link_graph_depth = Arc::new(AtomicUsize::new(0));
+    let (link_graph_sender, link_graph_receiver) =
+        mpsc::channel::<EventPayload>(link_graph_channel_capacity);
 
     // --- Background Tasks ---
 
@@ -611,7 +617,8 @@ async fn main() -> Result<()> {
     tasks.push(price_thread);
 
     let monitor_redis_client = redis_client.clone();
-    let monitor_task = tokio::spawn(redis_queue_monitor(monitor_redis_client));
+    let monitor_depth = link_graph_depth.clone();
+    let monitor_task = tokio::spawn(redis_queue_monitor(monitor_redis_client, monitor_depth));
     tasks.push(monitor_task);
 
     let publisher_redis_client = redis_client.clone();
@@ -653,11 +660,15 @@ async fn main() -> Result<()> {
         let aggregator_db_client = db_client.clone();
         let aggregator_redis_client = redis_client.clone();
         let wallet_aggregator_price_service = price_service.clone();
+        let link_graph_sender_clone = link_graph_sender.clone();
+        let link_graph_depth_clone = link_graph_depth.clone();
         let handle = tokio::spawn(async move {
             match aggregator::wallet_stats::WalletAggregator::new(
                 aggregator_db_client,
                 aggregator_redis_client,
                 wallet_aggregator_price_service,
+                link_graph_sender_clone,
+                link_graph_depth_clone,
             )
             .await
             {
@@ -724,6 +735,7 @@ async fn main() -> Result<()> {
         tasks.push(handle);
     }
 
+    let shared_link_graph_receiver = Arc::new(Mutex::new(link_graph_receiver));
     let programs_to_monitor = vec![
         "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P".to_string(), // Pump.fun Launchpad
         "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA".to_string(), // Pump.fun AMM
@@ -810,11 +822,12 @@ async fn main() -> Result<()> {
     // --- SPAWN THE WALLET GRAPH AGGREGATOR THREADS ---
     let link_graph_workers = channel_capacity_from_env("LINK_GRAPH_WORKERS", 1);
     for worker_id in 0..link_graph_workers {
-        let graph_redis_client = redis_client.clone();
         let graph_neo4j_client = Arc::clone(&neo4j_client);
         let graph_db_client = db_client.clone();
+        let graph_rx = Arc::clone(&shared_link_graph_receiver);
+        let graph_depth = link_graph_depth.clone();
         let handle = tokio::spawn(async move {
-            match LinkGraph::new(graph_db_client, graph_neo4j_client, graph_redis_client).await {
+            match LinkGraph::new(graph_db_client, graph_neo4j_client, graph_rx, graph_depth).await {
                 Ok(mut graph_aggregator) => {
                     println!(
                         "[Main] 🚀 Wallet graph aggregator worker {} spawned.",
