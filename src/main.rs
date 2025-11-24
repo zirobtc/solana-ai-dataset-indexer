@@ -59,7 +59,10 @@ mod types;
 mod utils;
 use crate::services::price_service::{PriceService, price_updater_task};
 use crate::{
-    aggregator::{link_graph::LinkGraph, token_stats::TokenAggregator},
+    aggregator::{
+        link_graph::{LinkGraph, WriteJob},
+        token_stats::TokenAggregator,
+    },
     services::solana_subscribers::{car_file_subscriber, geyser_subscriber, websocket_subscriber},
     types::{
         BurnRow, EventPayload, EventType, FeeCollectionRow, LiquidityRow, MigrationRow, MintRow,
@@ -641,7 +644,7 @@ async fn main() -> Result<()> {
     let writer_channel_capacity =
         channel_capacity_from_env("LINK_GRAPH_WRITER_CHANNEL_CAPACITY", 20_000);
     let (link_graph_write_sender, link_graph_write_receiver) =
-        mpsc::channel(writer_channel_capacity);
+        mpsc::channel::<WriteJob>(writer_channel_capacity);
     let link_graph_writer_depth = Arc::new(AtomicUsize::new(0));
     let mut link_graph_senders = Vec::with_capacity(link_graph_workers);
     let mut link_graph_receivers = Vec::with_capacity(link_graph_workers);

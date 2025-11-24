@@ -146,7 +146,7 @@ struct CachedPairState {
 }
 
 #[derive(Debug)]
-struct WriteJob {
+pub struct WriteJob {
     query: String,
     params: Vec<HashMap<String, BoltType>>,
 }
