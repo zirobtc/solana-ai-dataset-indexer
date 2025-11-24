@@ -348,7 +348,7 @@ impl TransactionHandler for StreamflowHandler {
                         // Now, pass the correctly typed temporary instruction to the decoder.
                         if let Ok(Some(crate::spl_system_decoder::DecodedInstruction::SplTokenTransferChecked { amount, .. })) =
                             crate::spl_system_decoder::decode_instruction(&temp_compiled_ix, &tx.account_keys) {
-                            
+
                             actual_withdrawn_amount = amount;
                             break;
                         }

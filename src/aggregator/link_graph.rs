@@ -111,6 +111,7 @@ pub struct LinkGraph {
     write_lock: Mutex<()>,
     trade_cache: Arc<Mutex<HashMap<(String, String), CachedPairState>>>,
     write_sender: mpsc::Sender<WriteJob>,
+    writer_depth: Arc<AtomicUsize>,
 }
 
 // Global Neo4j write lock to serialize batches across workers and avoid deadlocks.
@@ -156,6 +157,7 @@ impl LinkGraph {
         neo4j_client: Arc<Graph>,
         rx: mpsc::Receiver<EventPayload>,
         link_graph_depth: Arc<AtomicUsize>,
+        writer_depth: Arc<AtomicUsize>,
     ) -> Result<Self> {
         let cfg = &*LINK_GRAPH_CONFIG;
         let _: Ping = db_client.query("SELECT 1 as alive").fetch_one().await?;
@@ -164,8 +166,9 @@ impl LinkGraph {
         let (write_sender, write_receiver) =
             mpsc::channel::<WriteJob>(cfg.writer_channel_capacity);
         let writer_client = Arc::clone(&neo4j_client);
+        let writer_depth_clone = writer_depth.clone();
         tokio::spawn(async move {
-            LinkGraph::writer_task(write_receiver, writer_client).await;
+            LinkGraph::writer_task(write_receiver, writer_client, writer_depth_clone).await;
         });
         Ok(Self {
             db_client,
@@ -175,6 +178,7 @@ impl LinkGraph {
             write_lock: Mutex::new(()),
             trade_cache: Arc::new(Mutex::new(HashMap::new())),
             write_sender,
+            writer_depth,
         })
     }
 
@@ -488,8 +492,13 @@ impl LinkGraph {
         }
     }
 
-    async fn writer_task(mut rx: mpsc::Receiver<WriteJob>, neo4j_client: Arc<Graph>) {
+    async fn writer_task(
+        mut rx: mpsc::Receiver<WriteJob>,
+        neo4j_client: Arc<Graph>,
+        writer_depth: Arc<AtomicUsize>,
+    ) {
         while let Some(job) = rx.recv().await {
+            writer_depth.fetch_sub(1, Ordering::Relaxed);
             let q = query(&job.query).param("x", job.params.clone());
             if let Err(e) = neo4j_client.run(q).await {
                 eprintln!("[LinkGraph] 🔴 Writer failed to run query: {}", e);
@@ -510,7 +519,9 @@ impl LinkGraph {
         self.write_sender
             .send(job)
             .await
-            .map_err(|e| anyhow!("[LinkGraph] Failed to enqueue write: {}", e))
+            .map_err(|e| anyhow!("[LinkGraph] Failed to enqueue write: {}", e))?;
+        self.writer_depth.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 
     async fn process_mints(

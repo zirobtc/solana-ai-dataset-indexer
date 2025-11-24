@@ -965,7 +965,7 @@ fn process_nodes_in_parallel(
 
             // Heavyweight parsing (only for interesting transactions)
             let versioned_tx: VersionedTransaction = work_packet.transaction_node.as_parsed().ok()?;
-            
+
             // Final check for versioned transactions or those that failed the light parse
             let account_keys = versioned_tx.message.static_account_keys();
             let is_interesting = programs_of_interest.is_empty() || account_keys.iter().any(|key| programs_of_interest.contains(key));
