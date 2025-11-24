@@ -57,6 +57,9 @@ struct LinkGraphConfig {
     trade_cache_ttl_secs: u32,
     trade_cache_max_recent: usize,
     writer_channel_capacity: usize,
+    writer_max_batch_rows: usize,
+    writer_retry_attempts: u32,
+    writer_retry_backoff_ms: u64,
 }
 
 static LINK_GRAPH_CONFIG: Lazy<LinkGraphConfig> = Lazy::new(|| LinkGraphConfig {
@@ -78,6 +81,9 @@ static LINK_GRAPH_CONFIG: Lazy<LinkGraphConfig> = Lazy::new(|| LinkGraphConfig {
     trade_cache_ttl_secs: env_parse("LINK_GRAPH_TRADE_CACHE_TTL_SECS", 600_u32),
     trade_cache_max_recent: env_parse("LINK_GRAPH_TRADE_CACHE_MAX_RECENT", 16_usize),
     writer_channel_capacity: env_parse("LINK_GRAPH_WRITER_CHANNEL_CAPACITY", 5000_usize),
+    writer_max_batch_rows: env_parse("LINK_GRAPH_WRITER_MAX_BATCH_ROWS", 1000_usize),
+    writer_retry_attempts: env_parse("LINK_GRAPH_WRITER_RETRY_ATTEMPTS", 3_u32),
+    writer_retry_backoff_ms: env_parse("LINK_GRAPH_WRITER_RETRY_BACKOFF_MS", 250_u64),
 });
 
 fn env_parse<T: FromStr>(key: &str, default: T) -> T {
@@ -492,14 +498,58 @@ impl LinkGraph {
         neo4j_client: Arc<Graph>,
         writer_depth: Arc<AtomicUsize>,
     ) {
+        let cfg = &*LINK_GRAPH_CONFIG;
         while let Some(job) = rx.recv().await {
             writer_depth.fetch_sub(1, Ordering::Relaxed);
-            let q = query(&job.query).param("x", job.params.clone());
-            if let Err(e) = neo4j_client.run(q).await {
-                eprintln!("[LinkGraph] 🔴 Writer failed to run query: {}", e);
+            let batches = job
+                .params
+                .chunks(cfg.writer_max_batch_rows.max(1))
+                .map(|chunk| chunk.to_vec())
+                .collect::<Vec<_>>();
+
+            for (idx, params) in batches.iter().enumerate() {
+                let q = query(&job.query).param("x", params.clone());
+                let mut attempts = 0;
+                loop {
+                    let start = Instant::now();
+                    match neo4j_client.run(q.clone()).await {
+                        Ok(_) => {
+                            println!(
+                                "[LinkGraph] [Writer] ✅ wrote {} rows (chunk {}/{}) in {:?}",
+                                params.len(),
+                                idx + 1,
+                                batches.len(),
+                                start.elapsed()
+                            );
+                            break;
+                        }
+                        Err(e) => {
+                            let msg = e.to_string();
+                            attempts += 1;
+                            if msg.contains("DeadlockDetected")
+                                && attempts <= cfg.writer_retry_attempts
+                            {
+                                let backoff = cfg.writer_retry_backoff_ms * attempts as u64;
+                                eprintln!(
+                                    "[LinkGraph] [Writer] ⚠️ deadlock, retry {}/{} after {}ms: {}",
+                                    attempts, cfg.writer_retry_attempts, backoff, msg
+                                );
+                                sleep(Duration::from_millis(backoff)).await;
+                                continue;
+                            } else {
+                                eprintln!(
+                                    "[LinkGraph] 🔴 Writer fatal after {} attempts: {}",
+                                    attempts, msg
+                                );
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                }
             }
         }
         eprintln!("[LinkGraph] 🔴 Writer channel closed.");
+        std::process::exit(1);
     }
 
     async fn enqueue_write(
