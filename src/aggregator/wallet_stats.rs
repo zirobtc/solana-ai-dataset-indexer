@@ -30,6 +30,8 @@ static WALLET_STATS_REDIS_READ_COUNT: Lazy<usize> =
     Lazy::new(|| env_parse("WALLET_STATS_REDIS_READ_COUNT", 500_usize));
 static WALLET_STATS_REDIS_BLOCK_MS: Lazy<u64> =
     Lazy::new(|| env_parse("WALLET_STATS_REDIS_BLOCK_MS", 2000_u64));
+static WALLET_STATS_CHUNK_SIZE: Lazy<usize> =
+    Lazy::new(|| env_parse("WALLET_STATS_CHUNK_SIZE", 1000_usize));
 
 fn env_parse<T: FromStr>(key: &str, default: T) -> T {
     std::env::var(key)
@@ -219,18 +221,20 @@ impl WalletAggregator {
             tag: String,
         }
 
-        let mut cursor = self
-            .db_client
-            .query("SELECT wallet_address, tag FROM known_wallets WHERE wallet_address IN ?")
-            .bind(wallet_addresses)
-            .fetch::<WalletTagInfo>()?;
-
         let mut tags_map: HashMap<String, Vec<String>> = HashMap::new();
-        while let Some(row) = cursor.next().await? {
-            tags_map
-                .entry(row.wallet_address)
-                .or_default()
-                .push(row.tag);
+        for chunk in wallet_addresses.chunks(*WALLET_STATS_CHUNK_SIZE) {
+            let mut cursor = self
+                .db_client
+                .query("SELECT wallet_address, tag FROM known_wallets WHERE wallet_address IN ?")
+                .bind(chunk)
+                .fetch::<WalletTagInfo>()?;
+
+            while let Some(row) = cursor.next().await? {
+                tags_map
+                    .entry(row.wallet_address)
+                    .or_default()
+                    .push(row.tag);
+            }
         }
 
         Ok(tags_map)
@@ -963,36 +967,40 @@ impl WalletAggregator {
             return Ok(HashMap::new());
         }
 
-        let mut profile_cursor = self
-            .db_client
-            .query(
-                "
+        let mut profiles: HashMap<String, WalletProfileRow> = HashMap::new();
+        for chunk in wallets.chunks(*WALLET_STATS_CHUNK_SIZE) {
+            let mut profile_cursor = self
+                .db_client
+                .query(
+                    "
                 SELECT * FROM wallet_profiles
                 WHERE wallet_address IN ?
                 ORDER BY updated_at DESC
             ",
-            )
-            .bind(wallets)
-            .fetch::<WalletProfileRow>()?;
-        let mut profiles: HashMap<String, WalletProfileRow> = HashMap::new();
-        while let Some(profile) = profile_cursor.next().await? {
-            profiles.insert(profile.wallet_address.clone(), profile);
+                )
+                .bind(chunk)
+                .fetch::<WalletProfileRow>()?;
+            while let Some(profile) = profile_cursor.next().await? {
+                profiles.insert(profile.wallet_address.clone(), profile);
+            }
         }
 
-        let mut metrics_cursor = self
-            .db_client
-            .query(
-                "
+        let mut metrics_map: HashMap<String, WalletProfileMetricsRow> = HashMap::new();
+        for chunk in wallets.chunks(*WALLET_STATS_CHUNK_SIZE) {
+            let mut metrics_cursor = self
+                .db_client
+                .query(
+                    "
                 SELECT * FROM wallet_profile_metrics
                 WHERE wallet_address IN ?
                 ORDER BY updated_at DESC
             ",
-            )
-            .bind(wallets)
-            .fetch::<WalletProfileMetricsRow>()?;
-        let mut metrics_map: HashMap<String, WalletProfileMetricsRow> = HashMap::new();
-        while let Some(metrics) = metrics_cursor.next().await? {
-            metrics_map.insert(metrics.wallet_address.clone(), metrics);
+                )
+                .bind(chunk)
+                .fetch::<WalletProfileMetricsRow>()?;
+            while let Some(metrics) = metrics_cursor.next().await? {
+                metrics_map.insert(metrics.wallet_address.clone(), metrics);
+            }
         }
 
         let mut entries = HashMap::new();
@@ -1010,23 +1018,25 @@ impl WalletAggregator {
         if keys.is_empty() {
             return Ok(HashMap::new());
         }
-        let mut cursor = self
-            .db_client
-            .query(
-                "
+        let mut holdings = HashMap::new();
+        for chunk in keys.chunks(*WALLET_STATS_CHUNK_SIZE) {
+            let mut cursor = self
+                .db_client
+                .query(
+                    "
                 SELECT * FROM wallet_holdings
                 WHERE (wallet_address, mint_address) IN ?
                 ORDER BY updated_at DESC
             ",
-            )
-            .bind(keys)
-            .fetch::<WalletHoldingRow>()?;
-        let mut holdings = HashMap::new();
-        while let Some(holding) = cursor.next().await? {
-            holdings.insert(
-                (holding.wallet_address.clone(), holding.mint_address.clone()),
-                holding,
-            );
+                )
+                .bind(chunk)
+                .fetch::<WalletHoldingRow>()?;
+            while let Some(holding) = cursor.next().await? {
+                holdings.insert(
+                    (holding.wallet_address.clone(), holding.mint_address.clone()),
+                    holding,
+                );
+            }
         }
         Ok(holdings)
     }

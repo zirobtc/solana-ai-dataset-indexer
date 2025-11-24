@@ -15,6 +15,7 @@ use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_program::program_pack::Pack;
 use solana_sdk::pubkey::Pubkey;
 use spl_token::state::Mint;
+use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::str::FromStr;
@@ -23,6 +24,16 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 
 type TokenCache = HashMap<String, TokenEntry>;
+
+fn env_parse<T: FromStr>(key: &str, default: T) -> T {
+    env::var(key)
+        .ok()
+        .and_then(|v| v.parse::<T>().ok())
+        .unwrap_or(default)
+}
+
+static TOKEN_STATS_CHUNK_SIZE: Lazy<usize> =
+    Lazy::new(|| env_parse("TOKEN_STATS_CHUNK_SIZE", 1000usize));
 
 #[derive(Debug, Clone)]
 struct TokenEntry {
@@ -525,13 +536,15 @@ impl TokenAggregator {
 
         let mut existing_traders = HashSet::new();
         if !trader_pairs_in_batch.is_empty() {
-            let mut cursor = self.db_client
-                .query("SELECT DISTINCT (mint_address, wallet_address) FROM wallet_holdings WHERE (mint_address, wallet_address) IN ?")
-                .bind(trader_pairs_in_batch)
-                .fetch::<(String, String)>()?;
+            for chunk in trader_pairs_in_batch.chunks(*TOKEN_STATS_CHUNK_SIZE) {
+                let mut cursor = self.db_client
+                    .query("SELECT DISTINCT (mint_address, wallet_address) FROM wallet_holdings WHERE (mint_address, wallet_address) IN ?")
+                    .bind(chunk)
+                    .fetch::<(String, String)>()?;
 
-            while let Some(pair) = cursor.next().await? {
-                existing_traders.insert(pair);
+                while let Some(pair) = cursor.next().await? {
+                    existing_traders.insert(pair);
+                }
             }
         }
 
@@ -628,15 +641,17 @@ impl TokenAggregator {
             GROUP BY token_address
         ";
 
-        let mut cursor = self
-            .db_client
-            .query(query_str)
-            .bind(keys)
-            .fetch::<TokenStaticRow>()?;
         let mut statics = HashMap::new();
+        for chunk in keys.chunks(*TOKEN_STATS_CHUNK_SIZE) {
+            let mut cursor = self
+                .db_client
+                .query(query_str)
+                .bind(chunk)
+                .fetch::<TokenStaticRow>()?;
 
-        while let Ok(Some(token)) = cursor.next().await {
-            statics.insert(token.token_address.clone(), token);
+            while let Ok(Some(token)) = cursor.next().await {
+                statics.insert(token.token_address.clone(), token);
+            }
         }
 
         let metrics_map = self.fetch_token_metrics(keys).await?;
@@ -672,15 +687,18 @@ impl TokenAggregator {
             GROUP BY token_address
         ";
 
-        let mut cursor = self
-            .db_client
-            .query(query_str)
-            .bind(keys)
-            .fetch::<TokenMetricsRow>()?;
         let mut metrics = HashMap::new();
 
-        while let Ok(Some(row)) = cursor.next().await {
-            metrics.insert(row.token_address.clone(), row);
+        for chunk in keys.chunks(*TOKEN_STATS_CHUNK_SIZE) {
+            let mut cursor = self
+                .db_client
+                .query(query_str)
+                .bind(chunk)
+                .fetch::<TokenMetricsRow>()?;
+
+            while let Ok(Some(row)) = cursor.next().await {
+                metrics.insert(row.token_address.clone(), row);
+            }
         }
 
         Ok(metrics)
