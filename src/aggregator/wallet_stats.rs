@@ -61,8 +61,9 @@ pub struct WalletAggregator {
     db_client: Client,
     redis_conn: MultiplexedConnection,
     price_service: PriceService,
-    link_graph_sender: mpsc::Sender<EventPayload>,
-    link_graph_depth: Arc<AtomicUsize>,
+    link_graph_senders: Vec<mpsc::Sender<EventPayload>>,
+    link_graph_depths: Vec<Arc<AtomicUsize>>,
+    link_graph_shards: usize,
 }
 
 impl WalletAggregator {
@@ -70,16 +71,18 @@ impl WalletAggregator {
         db_client: Client,
         redis_client: RedisClient,
         price_service: PriceService,
-        link_graph_sender: mpsc::Sender<EventPayload>,
-        link_graph_depth: Arc<AtomicUsize>,
+        link_graph_senders: Vec<mpsc::Sender<EventPayload>>,
+        link_graph_depths: Vec<Arc<AtomicUsize>>,
+        link_graph_shards: usize,
     ) -> Result<Self> {
         let redis_conn = redis_client.get_multiplexed_async_connection().await?;
         Ok(Self {
             db_client,
             redis_conn,
             price_service,
-            link_graph_sender,
-            link_graph_depth,
+            link_graph_senders,
+            link_graph_depths,
+            link_graph_shards,
         })
     }
 
@@ -156,14 +159,20 @@ impl WalletAggregator {
                     let mut sorted_payloads = payloads;
                     sorted_payloads.sort_by_key(|p| p.timestamp);
                     for payload in sorted_payloads {
-                        if let Err(e) = self.link_graph_sender.send(payload).await {
+                        let shard = if self.link_graph_shards > 0 {
+                            ((payload.timestamp as usize) / 120usize) % self.link_graph_shards
+                        } else {
+                            0
+                        };
+                        let sender = &self.link_graph_senders[shard];
+                        if let Err(e) = sender.send(payload).await {
                             eprintln!(
-                                "[walletAggregator] 🔴 Failed to forward payload to LinkGraph channel: {}",
-                                e
+                                "[walletAggregator] 🔴 Failed to forward payload to LinkGraph channel (shard {}): {}",
+                                shard, e
                             );
                             break;
                         } else {
-                            self.link_graph_depth.fetch_add(1, Ordering::Relaxed);
+                            self.link_graph_depths[shard].fetch_add(1, Ordering::Relaxed);
                         }
                     }
                     // IMPORTANT: Acknowledge the messages from the source queue
