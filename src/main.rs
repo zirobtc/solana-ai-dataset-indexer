@@ -129,10 +129,10 @@ async fn transaction_processor(
                     historical_price = 195.0
                 }
 
-                println!("\n[Processor] Processing TX: {} at price ${:.4}", tx.signature, historical_price);
+                // println!("\n[Processor] Processing TX: {} at price ${:.4}", tx.signature, historical_price);
 
                 if let Some(e) = &tx.error {
-                    println!("[Processor] ⚠️ Processing Failed TX {:?}", e);
+                    // println!("[Processor] ⚠️ Processing Failed TX {:?}", e);
                 }
 
                 for handler in &protocol_handlers {
