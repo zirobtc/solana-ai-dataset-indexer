@@ -31,7 +31,7 @@ static WALLET_STATS_REDIS_READ_COUNT: Lazy<usize> =
 static WALLET_STATS_REDIS_BLOCK_MS: Lazy<u64> =
     Lazy::new(|| env_parse("WALLET_STATS_REDIS_BLOCK_MS", 2000_u64));
 static WALLET_STATS_CHUNK_SIZE: Lazy<usize> =
-    Lazy::new(|| env_parse("WALLET_STATS_CHUNK_SIZE", 1000_usize));
+    Lazy::new(|| env_parse("WALLET_STATS_CHUNK_SIZE", 2000_usize));
 
 fn env_parse<T: FromStr>(key: &str, default: T) -> T {
     std::env::var(key)

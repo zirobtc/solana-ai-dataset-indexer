@@ -577,7 +577,9 @@ async fn main() -> Result<()> {
     let neo4j_uri = env::var("NEO4J_URI").expect("NEO4J_URI must be set");
 
     // --- Client Initialization ---
-    let client_with_url = Client::default().with_url(&db_url);
+    let client_with_url = Client::default()
+        .with_url(&db_url)
+        .with_option("max_query_size", "100000000");
     let db_client = client_with_url.with_user("default").with_password("");
 
     db_client.query("SELECT 1").fetch_one::<u8>().await?;

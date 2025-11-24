@@ -19,7 +19,7 @@ use tokio::sync::{mpsc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use serde::Deserialize;
 use solana_sdk::native_token::LAMPORTS_PER_SOL;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -53,6 +53,10 @@ struct LinkGraphConfig {
     chunk_size_mint_small: usize,
     chunk_size_mint_large: usize,
     chunk_size_token: usize,
+    trade_cache_max_entries: usize,
+    trade_cache_ttl_secs: u32,
+    trade_cache_max_recent: usize,
+    writer_channel_capacity: usize,
 }
 
 static LINK_GRAPH_CONFIG: Lazy<LinkGraphConfig> = Lazy::new(|| LinkGraphConfig {
@@ -70,6 +74,10 @@ static LINK_GRAPH_CONFIG: Lazy<LinkGraphConfig> = Lazy::new(|| LinkGraphConfig {
     chunk_size_mint_small: env_parse("LINK_GRAPH_CHUNK_SIZE_MINT_SMALL", 1500_usize),
     chunk_size_mint_large: env_parse("LINK_GRAPH_CHUNK_SIZE_MINT_LARGE", 3000_usize),
     chunk_size_token: env_parse("LINK_GRAPH_CHUNK_SIZE_TOKEN", 3000_usize),
+    trade_cache_max_entries: env_parse("LINK_GRAPH_TRADE_CACHE_MAX_ENTRIES", 1_000_000_usize),
+    trade_cache_ttl_secs: env_parse("LINK_GRAPH_TRADE_CACHE_TTL_SECS", 600_u32),
+    trade_cache_max_recent: env_parse("LINK_GRAPH_TRADE_CACHE_MAX_RECENT", 16_usize),
+    writer_channel_capacity: env_parse("LINK_GRAPH_WRITER_CHANNEL_CAPACITY", 5000_usize),
 });
 
 fn env_parse<T: FromStr>(key: &str, default: T) -> T {
@@ -79,12 +87,14 @@ fn env_parse<T: FromStr>(key: &str, default: T) -> T {
         .unwrap_or(default)
 }
 
-#[derive(Row, Clone, Debug, Deserialize)]
-struct HistoricalTrade {
-    signature: String,
-    timestamp: u32,
+#[derive(Row, Deserialize, Clone)]
+struct FullHistTrade {
     maker: String,
-    total: f64,
+    base_address: String,
+    timestamp: u32,
+    signature: String,
+    trade_type: u8,
+    total_usd: f64,
     slippage: f32,
 }
 
@@ -99,7 +109,12 @@ pub struct LinkGraph {
     rx: mpsc::Receiver<EventPayload>,
     link_graph_depth: Arc<AtomicUsize>,
     write_lock: Mutex<()>,
+    trade_cache: Arc<Mutex<HashMap<(String, String), CachedPairState>>>,
+    write_sender: mpsc::Sender<WriteJob>,
 }
+
+// Global Neo4j write lock to serialize batches across workers and avoid deadlocks.
+static NEO4J_WRITE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 #[derive(Row, Deserialize, Debug)]
 struct Ping {
@@ -110,6 +125,31 @@ struct CountResult {
     count: u64,
 }
 
+#[derive(Clone, Debug)]
+struct CachedTrade {
+    maker: String,
+    base_address: String,
+    timestamp: u32,
+    signature: String,
+    trade_type: u8,
+    total_usd: f64,
+    slippage: f32,
+}
+
+#[derive(Debug)]
+struct CachedPairState {
+    first_buy: Option<CachedTrade>,
+    first_sell: Option<CachedTrade>,
+    recent: VecDeque<CachedTrade>,
+    last_seen: u32,
+}
+
+#[derive(Debug)]
+struct WriteJob {
+    query: String,
+    params: Vec<HashMap<String, BoltType>>,
+}
+
 impl LinkGraph {
     pub async fn new(
         db_client: Client,
@@ -117,15 +157,24 @@ impl LinkGraph {
         rx: mpsc::Receiver<EventPayload>,
         link_graph_depth: Arc<AtomicUsize>,
     ) -> Result<Self> {
+        let cfg = &*LINK_GRAPH_CONFIG;
         let _: Ping = db_client.query("SELECT 1 as alive").fetch_one().await?;
         neo4j_client.run(query("MATCH (n) RETURN count(n)")).await?;
         println!("[WalletGraph] ✔️ Connected to ClickHouse, Neo4j. Listening on channel.");
+        let (write_sender, write_receiver) =
+            mpsc::channel::<WriteJob>(cfg.writer_channel_capacity);
+        let writer_client = Arc::clone(&neo4j_client);
+        tokio::spawn(async move {
+            LinkGraph::writer_task(write_receiver, writer_client).await;
+        });
         Ok(Self {
             db_client,
             neo4j_client,
             rx,
             link_graph_depth,
             write_lock: Mutex::new(()),
+            trade_cache: Arc::new(Mutex::new(HashMap::new())),
+            write_sender,
         })
     }
 
@@ -294,6 +343,8 @@ impl LinkGraph {
     }
 
     async fn process_batch_with_retry(&self, payloads: Vec<EventPayload>) -> Result<()> {
+        // Serialize across all workers to avoid Neo4j deadlocks.
+        let _global_lock = NEO4J_WRITE_LOCK.lock().await;
         let mut attempts = 0;
         let max_retries = 3;
         loop {
@@ -319,6 +370,149 @@ impl LinkGraph {
     }
 
     // --- Main Logic for Pattern Detection ---
+    fn cached_trade_from_trade(trade: &TradeRow) -> CachedTrade {
+        CachedTrade {
+            maker: trade.maker.clone(),
+            base_address: trade.base_address.clone(),
+            timestamp: trade.timestamp,
+            signature: trade.signature.clone(),
+            trade_type: trade.trade_type,
+            total_usd: trade.total_usd,
+            slippage: trade.slippage,
+        }
+    }
+
+    async fn update_trade_cache(&self, trades: &[&TradeRow]) -> Result<()> {
+        if trades.is_empty() {
+            return Ok(());
+        }
+        let cfg = &*LINK_GRAPH_CONFIG;
+        let now_ts = trades.iter().map(|t| t.timestamp).max().unwrap_or(0);
+        let cutoff = now_ts.saturating_sub(cfg.trade_cache_ttl_secs);
+
+        let mut cache = self.trade_cache.lock().await;
+        cache.retain(|_, state| state.last_seen >= cutoff);
+
+        for trade in trades {
+            let key = (trade.maker.clone(), trade.base_address.clone());
+            let entry = cache.entry(key).or_insert_with(|| CachedPairState {
+                first_buy: None,
+                first_sell: None,
+                recent: VecDeque::new(),
+                last_seen: 0,
+            });
+
+            entry.last_seen = entry.last_seen.max(trade.timestamp);
+
+            let ct = Self::cached_trade_from_trade(trade);
+            if trade.trade_type == 0 {
+                if entry
+                    .first_buy
+                    .as_ref()
+                    .map_or(true, |b| ct.timestamp < b.timestamp)
+                {
+                    entry.first_buy = Some(ct.clone());
+                }
+            } else if trade.trade_type == 1 {
+                if entry
+                    .first_sell
+                    .as_ref()
+                    .map_or(true, |s| ct.timestamp < s.timestamp)
+                {
+                    entry.first_sell = Some(ct.clone());
+                }
+            }
+
+            entry.recent.push_back(ct);
+            while entry.recent.len() > cfg.trade_cache_max_recent {
+                entry.recent.pop_front();
+            }
+            while let Some(front) = entry.recent.front() {
+                if front.timestamp + cfg.trade_cache_ttl_secs < now_ts {
+                    entry.recent.pop_front();
+                } else {
+                    break;
+                }
+            }
+        }
+
+        if cache.len() > cfg.trade_cache_max_entries {
+            let mut entries: Vec<_> = cache.iter().map(|(k, v)| (k.clone(), v.last_seen)).collect();
+            entries.sort_by_key(|(_, ts)| *ts);
+            let to_drop = entries.len().saturating_sub(cfg.trade_cache_max_entries);
+            for (key, _) in entries.into_iter().take(to_drop) {
+                cache.remove(&key);
+            }
+        }
+        Ok(())
+    }
+
+    async fn build_histories_from_cache(
+        &self,
+        pairs: &[(String, String)],
+    ) -> Result<HashMap<(String, String), Vec<FullHistTrade>>> {
+        let mut map = HashMap::new();
+        let cache = self.trade_cache.lock().await;
+        for pair in pairs {
+            if let Some(state) = cache.get(pair) {
+                let mut collected = Vec::new();
+                if let Some(b) = &state.first_buy {
+                    collected.push(Self::cached_to_full(b));
+                }
+                if let Some(s) = &state.first_sell {
+                    collected.push(Self::cached_to_full(s));
+                }
+                for t in state.recent.iter() {
+                    collected.push(Self::cached_to_full(t));
+                }
+
+                if !collected.is_empty() {
+                    collected.sort_by_key(|t| t.timestamp);
+                    collected.dedup_by(|a, b| a.signature == b.signature);
+                    map.insert(pair.clone(), collected);
+                }
+            }
+        }
+        Ok(map)
+    }
+
+    fn cached_to_full(ct: &CachedTrade) -> FullHistTrade {
+        FullHistTrade {
+            maker: ct.maker.clone(),
+            base_address: ct.base_address.clone(),
+            timestamp: ct.timestamp,
+            signature: ct.signature.clone(),
+            trade_type: ct.trade_type,
+            total_usd: ct.total_usd,
+            slippage: ct.slippage,
+        }
+    }
+
+    async fn writer_task(mut rx: mpsc::Receiver<WriteJob>, neo4j_client: Arc<Graph>) {
+        while let Some(job) = rx.recv().await {
+            let q = query(&job.query).param("x", job.params.clone());
+            if let Err(e) = neo4j_client.run(q).await {
+                eprintln!("[LinkGraph] 🔴 Writer failed to run query: {}", e);
+            }
+        }
+        eprintln!("[LinkGraph] 🔴 Writer channel closed.");
+    }
+
+    async fn enqueue_write(
+        &self,
+        cypher: &str,
+        params: Vec<HashMap<String, BoltType>>,
+    ) -> Result<()> {
+        let job = WriteJob {
+            query: cypher.to_string(),
+            params,
+        };
+        self.write_sender
+            .send(job)
+            .await
+            .map_err(|e| anyhow!("[LinkGraph] Failed to enqueue write: {}", e))
+    }
+
     async fn process_mints(
         &self,
         mints: &[MintRow],
@@ -700,28 +894,22 @@ impl LinkGraph {
             .map(|t| (t.maker.clone(), t.base_address.clone()))
             .unique()
             .collect();
+        // Update and read from the bounded in-memory cache; fallback to CH only on misses.
+        self.update_trade_cache(&significant_trades).await?;
+        let mut historical_trades_map = self.build_histories_from_cache(&unique_pairs).await?;
 
-        #[derive(Row, Deserialize, Clone)]
-        struct FullHistTrade {
-            maker: String,
-            base_address: String,
-            timestamp: u32,
-            signature: String,
-            trade_type: u8,
-            total_usd: f64,
-            slippage: f32,
-        }
-
-        let mut historical_trades_map: HashMap<(String, String), Vec<FullHistTrade>> =
-            HashMap::new();
-
-        if !unique_pairs.is_empty() {
+        let missing_pairs: Vec<(String, String)> = unique_pairs
+            .iter()
+            .filter(|k| !historical_trades_map.contains_key(*k))
+            .cloned()
+            .collect();
+        if !missing_pairs.is_empty() {
             let historical_query = "
                 SELECT maker, base_address, toUnixTimestamp(timestamp) as timestamp, signature, trade_type, total_usd, slippage
                 FROM trades
                 WHERE (maker, base_address) IN ?
             ";
-            for chunk in unique_pairs.chunks(cfg.chunk_size_historical) {
+            for chunk in missing_pairs.chunks(cfg.chunk_size_historical) {
                 let chunk_results: Vec<FullHistTrade> = self
                     .db_client
                     .query(historical_query)
@@ -1301,28 +1489,25 @@ impl LinkGraph {
             .iter()
             .map(|l| {
                 HashMap::from([
-                    ("wa", BoltType::from(l.wallet_a.clone())),
-                    ("wb", BoltType::from(l.wallet_b.clone())),
-                    ("mint", BoltType::from(l.mint.clone())),
-                    ("slot", BoltType::from(l.slot)),
-                    ("timestamp", BoltType::from(l.timestamp)),
-                    ("signatures", BoltType::from(l.signatures.clone())),
+                    ("wa".to_string(), BoltType::from(l.wallet_a.clone())),
+                    ("wb".to_string(), BoltType::from(l.wallet_b.clone())),
+                    ("mint".to_string(), BoltType::from(l.mint.clone())),
+                    ("slot".to_string(), BoltType::from(l.slot)),
+                    ("timestamp".to_string(), BoltType::from(l.timestamp)),
+                    ("signatures".to_string(), BoltType::from(l.signatures.clone())),
                 ])
             })
             .collect();
         // Corrected relationship name to BUNDLE_TRADE for consistency
-        let q = query("
+        let cypher = "
             UNWIND $x as t 
             MERGE (a:Wallet {address: t.wa})
             MERGE (b:Wallet {address: t.wb})
             MERGE (a)-[r:BUNDLE_TRADE {mint: t.mint, slot: t.slot}]->(b)
             ON CREATE SET r.timestamp = t.timestamp, r.signatures = t.signatures
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
-        ");
-        self.neo4j_client
-            .run(q.param("x", params))
-            .await
-            .map_err(|e| e.into())
+        ";
+        self.enqueue_write(cypher, params).await
     }
 
     async fn write_transfer_links(&self, links: &[TransferLink]) -> Result<()> {
@@ -1343,19 +1528,19 @@ impl LinkGraph {
             .iter()
             .map(|l| {
                 HashMap::from([
-                    ("source", BoltType::from(l.source.clone())),
-                    ("destination", BoltType::from(l.destination.clone())),
-                    ("mint", BoltType::from(l.mint.clone())),
-                    ("signature", BoltType::from(l.signature.clone())), // Include the signature
-                    ("timestamp", BoltType::from(l.timestamp)), // Include the on-chain timestamp
-                    ("amount", BoltType::from(l.amount)),
+                    ("source".to_string(), BoltType::from(l.source.clone())),
+                    ("destination".to_string(), BoltType::from(l.destination.clone())),
+                    ("mint".to_string(), BoltType::from(l.mint.clone())),
+                    ("signature".to_string(), BoltType::from(l.signature.clone())), // Include the signature
+                    ("timestamp".to_string(), BoltType::from(l.timestamp)), // Include the on-chain timestamp
+                    ("amount".to_string(), BoltType::from(l.amount)),
                 ])
             })
             .collect();
 
         // --- UPDATED CYPHER QUERY ---
         // The query now sets the signature and on-chain timestamp on the link when it's first created.
-        let q = query("
+        let cypher = "
             UNWIND $x as t 
             MERGE (s:Wallet {address: t.source})
             MERGE (d:Wallet {address: t.destination})
@@ -1365,10 +1550,9 @@ impl LinkGraph {
                 r.timestamp = t.timestamp,
                 r.amount = t.amount
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
-        ");
+        ";
 
-        let result = self.neo4j_client.run(q.param("x", params)).await;
-        result.map_err(|e| e.into())
+        self.enqueue_write(cypher, params).await
     }
 
     async fn write_coordinated_activity_links(
@@ -1383,23 +1567,23 @@ impl LinkGraph {
             .iter()
             .map(|l| {
                 HashMap::from([
-                    ("leader", BoltType::from(l.leader.clone())),
-                    ("follower", BoltType::from(l.follower.clone())),
-                    ("mint", BoltType::from(l.mint.clone())),
-                    ("timestamp", BoltType::from(l.timestamp)),
+                    ("leader".to_string(), BoltType::from(l.leader.clone())),
+                    ("follower".to_string(), BoltType::from(l.follower.clone())),
+                    ("mint".to_string(), BoltType::from(l.mint.clone())),
+                    ("timestamp".to_string(), BoltType::from(l.timestamp)),
                     // Use the new, correct field names
-                    ("l_sig_1", BoltType::from(l.leader_first_sig.clone())),
-                    ("l_sig_2", BoltType::from(l.leader_second_sig.clone())),
-                    ("f_sig_1", BoltType::from(l.follower_first_sig.clone())),
-                    ("f_sig_2", BoltType::from(l.follower_second_sig.clone())),
-                    ("gap_1", BoltType::from(l.time_gap_on_first_sec)),
-                    ("gap_2", BoltType::from(l.time_gap_on_second_sec)),
+                    ("l_sig_1".to_string(), BoltType::from(l.leader_first_sig.clone())),
+                    ("l_sig_2".to_string(), BoltType::from(l.leader_second_sig.clone())),
+                    ("f_sig_1".to_string(), BoltType::from(l.follower_first_sig.clone())),
+                    ("f_sig_2".to_string(), BoltType::from(l.follower_second_sig.clone())),
+                    ("gap_1".to_string(), BoltType::from(l.time_gap_on_first_sec)),
+                    ("gap_2".to_string(), BoltType::from(l.time_gap_on_second_sec)),
                 ])
             })
             .collect();
 
         // This query now creates a single, comprehensive link per pair/mint
-        let q = query("
+        let cypher = "
             UNWIND $x as t
             MERGE (l:Wallet {address: t.leader})
             MERGE (f:Wallet {address: t.follower})
@@ -1413,12 +1597,9 @@ impl LinkGraph {
                 r.time_gap_on_first_sec = t.gap_1,
                 r.time_gap_on_second_sec = t.gap_2
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
-        ");
+        ";
 
-        self.neo4j_client
-            .run(q.param("x", params))
-            .await
-            .map_err(|e| e.into())
+        self.enqueue_write(cypher, params).await
     }
 
     async fn write_copied_trade_links(&self, links: &[CopiedTradeLink]) -> Result<()> {
@@ -1430,28 +1611,28 @@ impl LinkGraph {
             .iter()
             .map(|l| {
                 HashMap::from([
-                    ("follower", BoltType::from(l.follower.clone())),
-                    ("leader", BoltType::from(l.leader.clone())),
-                    ("mint", BoltType::from(l.mint.clone())),
-                    ("buy_gap", BoltType::from(l.time_gap_on_buy_sec)),
-                    ("sell_gap", BoltType::from(l.time_gap_on_sell_sec)),
-                    ("leader_pnl", BoltType::from(l.leader_pnl)),
-                    ("follower_pnl", BoltType::from(l.follower_pnl)),
-                    ("l_buy_sig", BoltType::from(l.leader_buy_sig.clone())),
-                    ("l_sell_sig", BoltType::from(l.leader_sell_sig.clone())),
-                    ("f_buy_sig", BoltType::from(l.follower_buy_sig.clone())),
-                    ("f_sell_sig", BoltType::from(l.follower_sell_sig.clone())),
-                    ("l_buy_total", BoltType::from(l.leader_buy_total)),
-                    ("l_sell_total", BoltType::from(l.leader_sell_total)),
-                    ("f_buy_total", BoltType::from(l.follower_buy_total)),
-                    ("f_sell_total", BoltType::from(l.follower_sell_total)),
-                    ("f_buy_slip", BoltType::from(l.follower_buy_slippage)),
-                    ("f_sell_slip", BoltType::from(l.follower_sell_slippage)),
-                    ("timestamp", BoltType::from(l.timestamp)),
+                    ("follower".to_string(), BoltType::from(l.follower.clone())),
+                    ("leader".to_string(), BoltType::from(l.leader.clone())),
+                    ("mint".to_string(), BoltType::from(l.mint.clone())),
+                    ("buy_gap".to_string(), BoltType::from(l.time_gap_on_buy_sec)),
+                    ("sell_gap".to_string(), BoltType::from(l.time_gap_on_sell_sec)),
+                    ("leader_pnl".to_string(), BoltType::from(l.leader_pnl)),
+                    ("follower_pnl".to_string(), BoltType::from(l.follower_pnl)),
+                    ("l_buy_sig".to_string(), BoltType::from(l.leader_buy_sig.clone())),
+                    ("l_sell_sig".to_string(), BoltType::from(l.leader_sell_sig.clone())),
+                    ("f_buy_sig".to_string(), BoltType::from(l.follower_buy_sig.clone())),
+                    ("f_sell_sig".to_string(), BoltType::from(l.follower_sell_sig.clone())),
+                    ("l_buy_total".to_string(), BoltType::from(l.leader_buy_total)),
+                    ("l_sell_total".to_string(), BoltType::from(l.leader_sell_total)),
+                    ("f_buy_total".to_string(), BoltType::from(l.follower_buy_total)),
+                    ("f_sell_total".to_string(), BoltType::from(l.follower_sell_total)),
+                    ("f_buy_slip".to_string(), BoltType::from(l.follower_buy_slippage)),
+                    ("f_sell_slip".to_string(), BoltType::from(l.follower_sell_slippage)),
+                    ("timestamp".to_string(), BoltType::from(l.timestamp)),
                 ])
             })
             .collect();
-        let q = query("
+        let cypher = "
             UNWIND $x as t 
             MERGE (f:Wallet {address: t.follower})
             MERGE (l:Wallet {address: t.leader})
@@ -1476,11 +1657,8 @@ impl LinkGraph {
                 r.f_buy_slip = t.f_buy_slip,
                 r.f_sell_slip = t.f_sell_slip
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
-        ");
-        self.neo4j_client
-            .run(q.param("x", params))
-            .await
-            .map_err(|e| e.into())
+        ";
+        self.enqueue_write(cypher, params).await
     }
 
     async fn write_minted_links(&self, links: &[MintedLink], mints: &[MintRow]) -> Result<()> {
@@ -1494,11 +1672,11 @@ impl LinkGraph {
             .filter_map(|l| {
                 mint_map.get(&l.signature).map(|m| {
                     HashMap::from([
-                        ("creator", BoltType::from(m.creator_address.clone())),
-                        ("token", BoltType::from(m.mint_address.clone())),
-                        ("signature", BoltType::from(l.signature.clone())),
-                        ("timestamp", BoltType::from(l.timestamp)),
-                        ("buy_amount", BoltType::from(l.buy_amount)),
+                        ("creator".to_string(), BoltType::from(m.creator_address.clone())),
+                        ("token".to_string(), BoltType::from(m.mint_address.clone())),
+                        ("signature".to_string(), BoltType::from(l.signature.clone())),
+                        ("timestamp".to_string(), BoltType::from(l.timestamp)),
+                        ("buy_amount".to_string(), BoltType::from(l.buy_amount)),
                     ])
                 })
             })
@@ -1508,18 +1686,15 @@ impl LinkGraph {
             return Ok(());
         }
         // --- MODIFIED: MERGE on the signature for idempotency ---
-        let q = query("
+        let cypher = "
             UNWIND $x as t 
             MERGE (c:Wallet {address: t.creator})
             MERGE (k:Token {address: t.token})
             MERGE (c)-[r:MINTED {signature: t.signature}]->(k)
             ON CREATE SET r.timestamp = t.timestamp, r.buy_amount = t.buy_amount
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
-        ");
-        self.neo4j_client
-            .run(q.param("x", params))
-            .await
-            .map_err(|e| e.into())
+        ";
+        self.enqueue_write(cypher, params).await
     }
 
     async fn write_sniped_links(
@@ -1536,12 +1711,12 @@ impl LinkGraph {
             .filter_map(|l| {
                 snipers.get(&l.signature).map(|(wallet, token)| {
                     HashMap::from([
-                        ("wallet", BoltType::from(wallet.clone())),
-                        ("token", BoltType::from(token.clone())),
-                        ("signature", BoltType::from(l.signature.clone())),
-                        ("rank", BoltType::from(l.rank)),
-                        ("sniped_amount", BoltType::from(l.sniped_amount)),
-                        ("timestamp", BoltType::from(l.timestamp)),
+                        ("wallet".to_string(), BoltType::from(wallet.clone())),
+                        ("token".to_string(), BoltType::from(token.clone())),
+                        ("signature".to_string(), BoltType::from(l.signature.clone())),
+                        ("rank".to_string(), BoltType::from(l.rank)),
+                        ("sniped_amount".to_string(), BoltType::from(l.sniped_amount)),
+                        ("timestamp".to_string(), BoltType::from(l.timestamp)),
                     ])
                 })
             })
@@ -1552,18 +1727,15 @@ impl LinkGraph {
         }
 
         // --- MODIFIED: MERGE on signature ---
-        let q = query("
+        let cypher = "
             UNWIND $x as t
             MERGE (w:Wallet {address: t.wallet})
             MERGE (k:Token {address: t.token})
             MERGE (w)-[r:SNIPED {signature: t.signature}]->(k)
             ON CREATE SET r.rank = t.rank, r.sniped_amount = t.sniped_amount, r.timestamp = t.timestamp
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
-        ");
-        self.neo4j_client
-            .run(q.param("x", params))
-            .await
-            .map_err(|e| e.into())
+        ";
+        self.enqueue_write(cypher, params).await
     }
 
     async fn write_locked_supply_links(
@@ -1581,13 +1753,13 @@ impl LinkGraph {
             .filter_map(|l| {
                 lock_map.get(&l.signature).map(|lock_row| {
                     HashMap::from([
-                        ("sender", BoltType::from(lock_row.sender.clone())),
-                        ("recipient", BoltType::from(lock_row.recipient.clone())),
-                        ("mint", BoltType::from(lock_row.mint_address.clone())),
-                        ("signature", BoltType::from(l.signature.clone())),
-                        ("amount", BoltType::from(l.amount)),
-                        ("unlock_ts", BoltType::from(l.unlock_timestamp as i64)),
-                        ("timestamp", BoltType::from(l.timestamp)),
+                        ("sender".to_string(), BoltType::from(lock_row.sender.clone())),
+                        ("recipient".to_string(), BoltType::from(lock_row.recipient.clone())),
+                        ("mint".to_string(), BoltType::from(lock_row.mint_address.clone())),
+                        ("signature".to_string(), BoltType::from(l.signature.clone())),
+                        ("amount".to_string(), BoltType::from(l.amount)),
+                        ("unlock_ts".to_string(), BoltType::from(l.unlock_timestamp as i64)),
+                        ("timestamp".to_string(), BoltType::from(l.timestamp)),
                     ])
                 })
             })
@@ -1598,18 +1770,15 @@ impl LinkGraph {
         }
 
         // --- THE CRITICAL FIX ---
-        let q = query("
+        let cypher = "
             UNWIND $x as t 
             MERGE (s:Wallet {address: t.sender})
             MERGE (k:Token {address: t.mint}) 
             MERGE (s)-[r:LOCKED_SUPPLY {signature: t.signature}]->(k)
             ON CREATE SET r.amount = t.amount, r.unlock_timestamp = t.unlock_ts, r.recipient = t.recipient, r.timestamp = t.timestamp
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
-        ");
-        self.neo4j_client
-            .run(q.param("x", params))
-            .await
-            .map_err(|e| e.into())
+        ";
+        self.enqueue_write(cypher, params).await
     }
 
     async fn write_burned_links(&self, links: &[BurnedLink], burns: &[BurnRow]) -> Result<()> {
@@ -1623,11 +1792,11 @@ impl LinkGraph {
             .filter_map(|l| {
                 burn_map.get(&l.signature).map(|burn_row| {
                     HashMap::from([
-                        ("wallet", BoltType::from(burn_row.source.clone())),
-                        ("token", BoltType::from(burn_row.mint_address.clone())),
-                        ("signature", BoltType::from(l.signature.clone())),
-                        ("amount", BoltType::from(l.amount)),
-                        ("timestamp", BoltType::from(l.timestamp)),
+                        ("wallet".to_string(), BoltType::from(burn_row.source.clone())),
+                        ("token".to_string(), BoltType::from(burn_row.mint_address.clone())),
+                        ("signature".to_string(), BoltType::from(l.signature.clone())),
+                        ("amount".to_string(), BoltType::from(l.amount)),
+                        ("timestamp".to_string(), BoltType::from(l.timestamp)),
                     ])
                 })
             })
@@ -1637,17 +1806,14 @@ impl LinkGraph {
             return Ok(());
         }
         // --- MODIFIED: MERGE on signature ---
-        let q = query("
+        let cypher = "
             UNWIND $x as t 
             MATCH (w:Wallet {address: t.wallet}), (k:Token {address: t.token}) 
             MERGE (w)-[r:BURNED {signature: t.signature}]->(k)
             ON CREATE SET r.amount = t.amount, r.timestamp = t.timestamp
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
-        ");
-        self.neo4j_client
-            .run(q.param("x", params))
-            .await
-            .map_err(|e| e.into())
+        ";
+        self.enqueue_write(cypher, params).await
     }
 
     async fn write_provided_liquidity_links(&self, links: &[ProvidedLiquidityLink]) -> Result<()> {
@@ -1658,30 +1824,27 @@ impl LinkGraph {
             .iter()
             .map(|l| {
                 HashMap::from([
-                    ("wallet", BoltType::from(l.wallet.clone())),
-                    ("token", BoltType::from(l.token.clone())),
-                    ("signature", BoltType::from(l.signature.clone())),
-                    ("pool_address", BoltType::from(l.pool_address.clone())),
-                    ("amount_base", BoltType::from(l.amount_base)),
-                    ("amount_quote", BoltType::from(l.amount_quote)),
-                    ("timestamp", BoltType::from(l.timestamp)),
+                    ("wallet".to_string(), BoltType::from(l.wallet.clone())),
+                    ("token".to_string(), BoltType::from(l.token.clone())),
+                    ("signature".to_string(), BoltType::from(l.signature.clone())),
+                    ("pool_address".to_string(), BoltType::from(l.pool_address.clone())),
+                    ("amount_base".to_string(), BoltType::from(l.amount_base)),
+                    ("amount_quote".to_string(), BoltType::from(l.amount_quote)),
+                    ("timestamp".to_string(), BoltType::from(l.timestamp)),
                 ])
             })
             .collect();
 
         // --- MODIFIED: MERGE on signature ---
-        let q = query("
+        let cypher = "
             UNWIND $x as t
             MERGE (w:Wallet {address: t.wallet})
             MERGE (k:Token {address: t.token})
             MERGE (w)-[r:PROVIDED_LIQUIDITY {signature: t.signature}]->(k)
             ON CREATE SET r.pool_address = t.pool_address, r.amount_base = t.amount_base, r.amount_quote = t.amount_quote, r.timestamp = t.timestamp
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
-        ");
-        self.neo4j_client
-            .run(q.param("x", params))
-            .await
-            .map_err(|e| e.into())
+        ";
+        self.enqueue_write(cypher, params).await
     }
 
     async fn write_top_trader_of_links(&self, links: &[TopTraderOfLink]) -> Result<()> {
@@ -1692,18 +1855,18 @@ impl LinkGraph {
             .iter()
             .map(|l| {
                 HashMap::from([
-                    ("wallet", BoltType::from(l.wallet.clone())),
-                    ("token", BoltType::from(l.token.clone())),
+                    ("wallet".to_string(), BoltType::from(l.wallet.clone())),
+                    ("token".to_string(), BoltType::from(l.token.clone())),
                     // Add new params
-                    ("pnl_at_creation", BoltType::from(l.pnl_at_creation)),
-                    ("ath_at_creation", BoltType::from(l.ath_usd_at_creation)),
-                    ("timestamp", BoltType::from(l.timestamp)),
+                    ("pnl_at_creation".to_string(), BoltType::from(l.pnl_at_creation)),
+                    ("ath_at_creation".to_string(), BoltType::from(l.ath_usd_at_creation)),
+                    ("timestamp".to_string(), BoltType::from(l.timestamp)),
                 ])
             })
             .collect();
 
         // --- MODIFIED: The definitive Cypher query ---
-        let q = query("
+        let cypher = "
             UNWIND $x as t
             MERGE (w:Wallet {address: t.wallet})
             MERGE (k:Token {address: t.token})
@@ -1713,11 +1876,8 @@ impl LinkGraph {
                 r.ath_usd_at_creation = t.ath_at_creation,
                 r.timestamp = t.timestamp
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
-        ");
-        self.neo4j_client
-            .run(q.param("x", params))
-            .await
-            .map_err(|e| e.into())
+        ";
+        self.enqueue_write(cypher, params).await
     }
 
     async fn write_whale_of_links(&self, links: &[WhaleOfLink]) -> Result<()> {
@@ -1728,18 +1888,18 @@ impl LinkGraph {
             .iter()
             .map(|l| {
                 HashMap::from([
-                    ("wallet", BoltType::from(l.wallet.clone())),
-                    ("token", BoltType::from(l.token.clone())),
+                    ("wallet".to_string(), BoltType::from(l.wallet.clone())),
+                    ("token".to_string(), BoltType::from(l.token.clone())),
                     // Add new params
-                    ("pct_at_creation", BoltType::from(l.holding_pct_at_creation)),
-                    ("ath_at_creation", BoltType::from(l.ath_usd_at_creation)),
-                    ("timestamp", BoltType::from(l.timestamp)),
+                    ("pct_at_creation".to_string(), BoltType::from(l.holding_pct_at_creation)),
+                    ("ath_at_creation".to_string(), BoltType::from(l.ath_usd_at_creation)),
+                    ("timestamp".to_string(), BoltType::from(l.timestamp)),
                 ])
             })
             .collect();
 
         // --- MODIFIED: The definitive Cypher query ---
-        let q = query("
+        let cypher = "
             UNWIND $x as t
             MERGE (w:Wallet {address: t.wallet})
             MERGE (k:Token {address: t.token})
@@ -1749,11 +1909,8 @@ impl LinkGraph {
                 r.ath_usd_at_creation = t.ath_at_creation,
                 r.timestamp = t.timestamp
             ON MATCH SET r.timestamp = CASE WHEN t.timestamp < r.timestamp THEN t.timestamp ELSE r.timestamp END
-        ");
-        self.neo4j_client
-            .run(q.param("x", params))
-            .await
-            .map_err(|e| e.into())
+        ";
+        self.enqueue_write(cypher, params).await
     }
 
     async fn fetch_latest_ath_map(
