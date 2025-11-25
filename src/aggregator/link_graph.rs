@@ -61,6 +61,9 @@ struct LinkGraphConfig {
     writer_retry_attempts: u32,
     writer_retry_backoff_ms: u64,
     ath_fetch_chunk_size: usize,
+    ch_retry_attempts: u32,
+    ch_retry_backoff_ms: u64,
+    ch_fail_fast: bool,
 }
 
 static LINK_GRAPH_CONFIG: Lazy<LinkGraphConfig> = Lazy::new(|| LinkGraphConfig {
@@ -86,6 +89,9 @@ static LINK_GRAPH_CONFIG: Lazy<LinkGraphConfig> = Lazy::new(|| LinkGraphConfig {
     writer_retry_attempts: env_parse("LINK_GRAPH_WRITER_RETRY_ATTEMPTS", 3_u32),
     writer_retry_backoff_ms: env_parse("LINK_GRAPH_WRITER_RETRY_BACKOFF_MS", 250_u64),
     ath_fetch_chunk_size: env_parse("LINK_GRAPH_ATH_FETCH_CHUNK_SIZE", 500_usize),
+    ch_retry_attempts: env_parse("LINK_GRAPH_CH_RETRY_ATTEMPTS", 3_u32),
+    ch_retry_backoff_ms: env_parse("LINK_GRAPH_CH_RETRY_BACKOFF_MS", 500_u64),
+    ch_fail_fast: env_parse("LINK_GRAPH_CH_FAIL_FAST", true),
 });
 
 fn env_parse<T: FromStr>(key: &str, default: T) -> T {
@@ -1209,7 +1215,9 @@ impl LinkGraph {
             return Ok(());
         }
 
-        let ath_map = self.fetch_latest_ath_map(&mints_to_query).await?;
+        let ath_map = self
+            .fetch_latest_ath_map_with_retry(&mints_to_query)
+            .await?;
         if ath_map.is_empty() {
             return Ok(());
         }
@@ -1381,7 +1389,9 @@ impl LinkGraph {
             return Ok(());
         }
         let confident_mints: Vec<String> = fully_tracked_mints.iter().cloned().collect();
-        let ath_map = self.fetch_latest_ath_map(&confident_mints).await?;
+        let ath_map = self
+            .fetch_latest_ath_map_with_retry(&confident_mints)
+            .await?;
         if ath_map.is_empty() {
             return Ok(());
         }
@@ -2082,7 +2092,7 @@ impl LinkGraph {
         self.enqueue_write(cypher, params).await
     }
 
-    async fn fetch_latest_ath_map(
+    async fn fetch_latest_ath_map_with_retry(
         &self,
         token_addresses: &[String],
     ) -> Result<HashMap<String, f64>> {
@@ -2106,15 +2116,40 @@ impl LinkGraph {
         ";
 
         for chunk in token_addresses.chunks(cfg.ath_fetch_chunk_size.max(1)) {
-            let mut chunk_rows: Vec<AthInfo> = self
-                .db_client
-                .query(query)
-                .bind(chunk)
-                .fetch_all()
-                .await
-                .map_err(|e| anyhow!("[LinkGraph] ATH fetch failed: {}", e))?;
-            for row in chunk_rows.drain(..) {
-                ath_map.insert(row.token_address, row.ath_price_usd);
+            let mut attempts = 0;
+            loop {
+                attempts += 1;
+                let result: Result<Vec<AthInfo>> = self
+                    .db_client
+                    .query(query)
+                    .bind(chunk)
+                    .fetch_all()
+                    .await
+                    .map_err(|e| anyhow!("[LinkGraph] ATH fetch failed: {}", e));
+
+                match result {
+                    Ok(mut chunk_rows) => {
+                        for row in chunk_rows.drain(..) {
+                            ath_map.insert(row.token_address, row.ath_price_usd);
+                        }
+                        break;
+                    }
+                    Err(e) => {
+                        if attempts >= cfg.ch_retry_attempts {
+                            eprintln!(
+                                "[LinkGraph] 🔴 ATH fetch failed after {} attempts: {}",
+                                attempts, e
+                            );
+                            std::process::exit(1);
+                        }
+                        let backoff = cfg.ch_retry_backoff_ms * attempts as u64;
+                        eprintln!(
+                            "[LinkGraph] ⚠️ ATH fetch retry {}/{} after {}ms: {}",
+                            attempts, cfg.ch_retry_attempts, backoff, e
+                        );
+                        sleep(Duration::from_millis(backoff)).await;
+                    }
+                }
             }
         }
 

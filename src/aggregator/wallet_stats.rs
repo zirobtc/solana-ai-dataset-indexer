@@ -35,6 +35,10 @@ static WALLET_STATS_REDIS_BLOCK_MS: Lazy<u64> =
     Lazy::new(|| env_parse("WALLET_STATS_REDIS_BLOCK_MS", 2000_u64));
 static WALLET_STATS_CHUNK_SIZE: Lazy<usize> =
     Lazy::new(|| env_parse("WALLET_STATS_CHUNK_SIZE", 2000_usize));
+static WALLET_STATS_CH_RETRY_ATTEMPTS: Lazy<u32> =
+    Lazy::new(|| env_parse("WALLET_STATS_CH_RETRY_ATTEMPTS", 3_u32));
+static WALLET_STATS_CH_RETRY_BACKOFF_MS: Lazy<u64> =
+    Lazy::new(|| env_parse("WALLET_STATS_CH_RETRY_BACKOFF_MS", 500_u64));
 
 fn env_parse<T: FromStr>(key: &str, default: T) -> T {
     std::env::var(key)
@@ -970,40 +974,108 @@ impl WalletAggregator {
         if wallets.is_empty() {
             return Ok(HashMap::new());
         }
+        let max_attempts = *WALLET_STATS_CH_RETRY_ATTEMPTS;
+        let backoff_ms = *WALLET_STATS_CH_RETRY_BACKOFF_MS;
 
         let mut profiles: HashMap<String, WalletProfileRow> = HashMap::new();
         for chunk in wallets.chunks(*WALLET_STATS_CHUNK_SIZE) {
-            let mut profile_cursor = self
-                .db_client
-                .query(
-                    "
-                SELECT * FROM wallet_profiles
-                WHERE wallet_address IN ?
-                ORDER BY updated_at DESC
-            ",
-                )
-                .bind(chunk)
-                .fetch::<WalletProfileRow>()?;
-            while let Some(profile) = profile_cursor.next().await? {
-                profiles.insert(profile.wallet_address.clone(), profile);
+            let mut attempts = 0;
+            loop {
+                attempts += 1;
+                let result: Result<Vec<WalletProfileRow>> = (|| async {
+                    let mut rows = Vec::new();
+                    let mut cursor = self
+                        .db_client
+                        .query(
+                            "
+                        SELECT * FROM wallet_profiles
+                        WHERE wallet_address IN ?
+                        ORDER BY updated_at DESC
+                    ",
+                        )
+                        .bind(chunk)
+                        .fetch::<WalletProfileRow>()?;
+                    while let Some(profile) = cursor.next().await? {
+                        rows.push(profile);
+                    }
+                    Ok(rows)
+                })()
+                .await;
+
+                match result {
+                    Ok(rows) => {
+                        for profile in rows {
+                            profiles.insert(profile.wallet_address.clone(), profile);
+                        }
+                        break;
+                    }
+                    Err(e) => {
+                        if attempts >= max_attempts {
+                            eprintln!(
+                                "[walletAggregator] 🔴 fetch_profiles failed after {} attempts: {}",
+                                attempts, e
+                            );
+                            std::process::exit(1);
+                        }
+                        let delay = backoff_ms * attempts as u64;
+                        eprintln!(
+                            "[walletAggregator] ⚠️ fetch_profiles retry {}/{} after {}ms: {}",
+                            attempts, max_attempts, delay, e
+                        );
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                    }
+                }
             }
         }
 
         let mut metrics_map: HashMap<String, WalletProfileMetricsRow> = HashMap::new();
         for chunk in wallets.chunks(*WALLET_STATS_CHUNK_SIZE) {
-            let mut metrics_cursor = self
-                .db_client
-                .query(
-                    "
-                SELECT * FROM wallet_profile_metrics
-                WHERE wallet_address IN ?
-                ORDER BY updated_at DESC
-            ",
-                )
-                .bind(chunk)
-                .fetch::<WalletProfileMetricsRow>()?;
-            while let Some(metrics) = metrics_cursor.next().await? {
-                metrics_map.insert(metrics.wallet_address.clone(), metrics);
+            let mut attempts = 0;
+            loop {
+                attempts += 1;
+                let result: Result<Vec<WalletProfileMetricsRow>> = (|| async {
+                    let mut rows = Vec::new();
+                    let mut cursor = self
+                        .db_client
+                        .query(
+                            "
+                        SELECT * FROM wallet_profile_metrics
+                        WHERE wallet_address IN ?
+                        ORDER BY updated_at DESC
+                    ",
+                        )
+                        .bind(chunk)
+                        .fetch::<WalletProfileMetricsRow>()?;
+                    while let Some(metrics) = cursor.next().await? {
+                        rows.push(metrics);
+                    }
+                    Ok(rows)
+                })()
+                .await;
+
+                match result {
+                    Ok(rows) => {
+                        for metrics in rows {
+                            metrics_map.insert(metrics.wallet_address.clone(), metrics);
+                        }
+                        break;
+                    }
+                    Err(e) => {
+                        if attempts >= max_attempts {
+                            eprintln!(
+                                "[walletAggregator] 🔴 fetch_profile_metrics failed after {} attempts: {}",
+                                attempts, e
+                            );
+                            std::process::exit(1);
+                        }
+                        let delay = backoff_ms * attempts as u64;
+                        eprintln!(
+                            "[walletAggregator] ⚠️ fetch_profile_metrics retry {}/{} after {}ms: {}",
+                            attempts, max_attempts, delay, e
+                        );
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                    }
+                }
             }
         }
 
@@ -1022,24 +1094,59 @@ impl WalletAggregator {
         if keys.is_empty() {
             return Ok(HashMap::new());
         }
+        let max_attempts = *WALLET_STATS_CH_RETRY_ATTEMPTS;
+        let backoff_ms = *WALLET_STATS_CH_RETRY_BACKOFF_MS;
         let mut holdings = HashMap::new();
         for chunk in keys.chunks(*WALLET_STATS_CHUNK_SIZE) {
-            let mut cursor = self
-                .db_client
-                .query(
-                    "
-                SELECT * FROM wallet_holdings
-                WHERE (wallet_address, mint_address) IN ?
-                ORDER BY updated_at DESC
-            ",
-                )
-                .bind(chunk)
-                .fetch::<WalletHoldingRow>()?;
-            while let Some(holding) = cursor.next().await? {
-                holdings.insert(
-                    (holding.wallet_address.clone(), holding.mint_address.clone()),
-                    holding,
-                );
+            let mut attempts = 0;
+            loop {
+                attempts += 1;
+                let result: Result<Vec<WalletHoldingRow>> = (|| async {
+                    let mut rows = Vec::new();
+                    let mut cursor = self
+                        .db_client
+                        .query(
+                            "
+                        SELECT * FROM wallet_holdings
+                        WHERE (wallet_address, mint_address) IN ?
+                        ORDER BY updated_at DESC
+                    ",
+                        )
+                        .bind(chunk)
+                        .fetch::<WalletHoldingRow>()?;
+                    while let Some(holding) = cursor.next().await? {
+                        rows.push(holding);
+                    }
+                    Ok(rows)
+                })()
+                .await;
+
+                match result {
+                    Ok(rows) => {
+                        for holding in rows {
+                            holdings.insert(
+                                (holding.wallet_address.clone(), holding.mint_address.clone()),
+                                holding,
+                            );
+                        }
+                        break;
+                    }
+                    Err(e) => {
+                        if attempts >= max_attempts {
+                            eprintln!(
+                                "[walletAggregator] 🔴 fetch_holdings failed after {} attempts: {}",
+                                attempts, e
+                            );
+                            std::process::exit(1);
+                        }
+                        let delay = backoff_ms * attempts as u64;
+                        eprintln!(
+                            "[walletAggregator] ⚠️ fetch_holdings retry {}/{} after {}ms: {}",
+                            attempts, max_attempts, delay, e
+                        );
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                    }
+                }
             }
         }
         Ok(holdings)
