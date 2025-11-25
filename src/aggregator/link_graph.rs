@@ -60,6 +60,7 @@ struct LinkGraphConfig {
     writer_max_batch_rows: usize,
     writer_retry_attempts: u32,
     writer_retry_backoff_ms: u64,
+    ath_fetch_chunk_size: usize,
 }
 
 static LINK_GRAPH_CONFIG: Lazy<LinkGraphConfig> = Lazy::new(|| LinkGraphConfig {
@@ -84,6 +85,7 @@ static LINK_GRAPH_CONFIG: Lazy<LinkGraphConfig> = Lazy::new(|| LinkGraphConfig {
     writer_max_batch_rows: env_parse("LINK_GRAPH_WRITER_MAX_BATCH_ROWS", 1000_usize),
     writer_retry_attempts: env_parse("LINK_GRAPH_WRITER_RETRY_ATTEMPTS", 3_u32),
     writer_retry_backoff_ms: env_parse("LINK_GRAPH_WRITER_RETRY_BACKOFF_MS", 250_u64),
+    ath_fetch_chunk_size: env_parse("LINK_GRAPH_ATH_FETCH_CHUNK_SIZE", 500_usize),
 });
 
 fn env_parse<T: FromStr>(key: &str, default: T) -> T {
@@ -2103,7 +2105,7 @@ impl LinkGraph {
             GROUP BY token_address
         ";
 
-        for chunk in token_addresses.chunks(cfg.chunk_size_large) {
+        for chunk in token_addresses.chunks(cfg.ath_fetch_chunk_size.max(1)) {
             let mut chunk_rows: Vec<AthInfo> = self
                 .db_client
                 .query(query)
