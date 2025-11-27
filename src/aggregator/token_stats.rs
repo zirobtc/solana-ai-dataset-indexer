@@ -806,12 +806,22 @@ impl TokenAggregator {
         insert_rows(
             &self.db_client,
             "token_metrics",
-            metric_rows,
+            metric_rows.clone(),
             "Token Aggregator",
             "token_metrics",
         )
         .await
         .with_context(|| "Failed to persist token metric history to ClickHouse")?;
+
+        insert_rows(
+            &self.db_client,
+            "token_metrics_latest",
+            metric_rows,
+            "Token Aggregator",
+            "token_metrics_latest",
+        )
+        .await
+        .with_context(|| "Failed to persist token metric snapshots to ClickHouse")?;
 
         Ok(())
     }

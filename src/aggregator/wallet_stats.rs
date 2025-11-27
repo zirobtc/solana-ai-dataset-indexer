@@ -949,9 +949,17 @@ impl WalletAggregator {
             insert_rows(
                 &self.db_client,
                 "wallet_profile_metrics",
-                updated_metrics,
+                updated_metrics.clone(),
                 "Wallet Aggregator",
                 "profile_metrics",
+            )
+            .await?;
+            insert_rows(
+                &self.db_client,
+                "wallet_profile_metrics_latest",
+                updated_metrics,
+                "Wallet Aggregator",
+                "profile_metrics_latest",
             )
             .await?;
         }
@@ -961,9 +969,17 @@ impl WalletAggregator {
             insert_rows(
                 &self.db_client,
                 "wallet_holdings",
-                updated_holdings,
+                updated_holdings.clone(),
                 "Wallet Aggregator",
                 "holdings",
+            )
+            .await?;
+            insert_rows(
+                &self.db_client,
+                "wallet_holdings_latest",
+                updated_holdings,
+                "Wallet Aggregator",
+                "holdings_latest",
             )
             .await?;
         }
