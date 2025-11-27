@@ -1233,7 +1233,7 @@ impl LinkGraph {
         let pnl_query = "
             SELECT 
                 wh.wallet_address, wh.mint_address, wh.realized_profit_pnl
-            FROM wallet_holdings AS wh
+            FROM wallet_holdings_latest AS wh
             WHERE wh.mint_address IN ? 
               AND wh.realized_profit_pnl > ? 
             QUALIFY ROW_NUMBER() OVER (PARTITION BY wh.mint_address ORDER BY wh.realized_profit_pnl DESC) = 1
@@ -1452,7 +1452,7 @@ impl LinkGraph {
 
         let whales_query = "
             SELECT wallet_address, mint_address, current_balance 
-            FROM wallet_holdings
+            FROM wallet_holdings_latest
             WHERE mint_address IN ? AND current_balance > 0
             QUALIFY ROW_NUMBER() OVER (PARTITION BY mint_address ORDER BY current_balance DESC) <= ?
         ";
@@ -2160,7 +2160,7 @@ impl LinkGraph {
 
     async fn fetch_pnl(&self, wallet_address: &str, mint_address: &str) -> Result<f64> {
         let q_str = format!(
-            "SELECT realized_profit_pnl FROM wallet_holdings WHERE wallet_address = '{}' AND mint_address = '{}'",
+            "SELECT realized_profit_pnl FROM wallet_holdings_latest WHERE wallet_address = '{}' AND mint_address = '{}'",
             wallet_address, mint_address
         );
         // Fetch the pre-calculated f32 value
