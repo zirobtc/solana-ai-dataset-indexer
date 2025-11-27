@@ -41,41 +41,34 @@ pub fn deserialize_lax<'a, T: BorshDeserialize>(data: &'a [u8]) -> Result<T, io:
 /// Decodes and formats a transaction, grouping top-level instructions
 /// with their corresponding inner instructions and logs. This function serves
 /// as a universal pre-processor for any specific decoder.
-pub fn format_transaction<'a>(
-    tx: &'a VersionedTransaction,
-    meta: &'a TransactionStatusMeta, // <-- This is the Geyser type, which is good.
-) -> Vec<FormattedInstruction<'a>> {
+pub fn format_transaction(
+    tx: &VersionedTransaction,
+    meta: &TransactionStatusMeta,
+) -> Vec<FormattedInstruction<'static>> {
     let mut formatted_instructions = Vec::new();
     let top_level_ixs = tx.message.instructions();
 
-    let inner_ix_map: HashMap<u8, &'a Vec<InnerInstruction>> =
-        if !meta.inner_instructions.is_empty() {
-            meta.inner_instructions
-                .iter()
-                .map(|ix_block| (ix_block.index as u8, &ix_block.instructions))
-                .collect()
-        } else {
-            HashMap::new()
-        };
+    let inner_ix_map: HashMap<u8, Vec<InnerInstruction>> = meta
+        .inner_instructions
+        .iter()
+        .map(|ix_block| (ix_block.index as u8, ix_block.instructions.clone()))
+        .collect();
 
-    let log_messages: Vec<&'a str> = meta.log_messages.iter().map(String::as_str).collect();
+    let log_messages: Vec<String> = meta.log_messages.clone();
 
     let mut top_level_invoke_indices: Vec<usize> = log_messages
         .iter()
         .enumerate()
         .filter(|(_, log)| log.ends_with(" invoke [1]"))
-        .map(|(i, _)| i)
+            .map(|(i, _)| i)
         .collect();
 
     top_level_invoke_indices.push(log_messages.len());
 
     for (i, top_ix) in top_level_ixs.iter().enumerate() {
-        // --- FIX STARTS HERE ---
-        // The type of `inners` must match the type from `inner_ix_map`.
-        let inners: Vec<Cow<'a, InnerInstruction>> = inner_ix_map // <-- CHANGE THIS TYPE
+        let inners: Vec<Cow<'static, InnerInstruction>> = inner_ix_map
             .get(&(i as u8))
-            .map_or(vec![], |ixs| ixs.iter().map(Cow::Borrowed).collect());
-        // --- FIX ENDS HERE ---
+            .map_or_else(Vec::new, |ixs| ixs.iter().cloned().map(Into::into).collect());
 
         let log_start_index = top_level_invoke_indices
             .get(i)
@@ -86,15 +79,16 @@ pub fn format_transaction<'a>(
             .cloned()
             .unwrap_or(log_messages.len());
 
-        let logs_for_ix: Vec<Cow<'a, str>> = log_messages
+        let logs_for_ix: Vec<Cow<'static, str>> = log_messages
             .get(log_start_index..log_end_index)
             .unwrap_or(&[])
             .iter()
-            .map(|s| Cow::Borrowed(*s))
+            .cloned()
+            .map(Into::into)
             .collect();
 
         formatted_instructions.push(FormattedInstruction {
-            instruction: Cow::Borrowed(top_ix),
+            instruction: Cow::Owned(top_ix.clone()),
             inner_instructions: inners,
             logs: logs_for_ix,
         });

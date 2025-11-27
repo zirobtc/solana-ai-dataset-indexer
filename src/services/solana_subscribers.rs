@@ -327,22 +327,19 @@ fn convert_grpc_to_unified(
         }
     }
 
-    let static_tx = Box::leak(Box::new(versioned_tx));
-    let static_meta = Box::leak(Box::new(meta.clone()));
-
     Ok(UnifiedTransaction {
         signature: signature.to_string(),
         slot: geyser_tx.slot,
         transaction_index,
         block_time: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as u32,
         signers,
-        error: static_meta
+        error: meta
             .err
             .as_ref()
             .map(|e| String::from_utf8_lossy(&e.err).to_string()),
         account_keys,
-        formatted_instructions: format_transaction(static_tx, static_meta),
-        logs: static_meta.log_messages.clone(),
+        formatted_instructions: format_transaction(&versioned_tx, &meta),
+        logs: meta.log_messages.clone(),
         pre_balances,
         post_balances,
         token_decimals,
@@ -1398,22 +1395,19 @@ fn convert_car_tx_to_unified(
         }
     }
 
-    let static_tx = Box::leak(Box::new(versioned_tx));
-    let static_meta = Box::leak(Box::new(geyser_meta));
-
     Ok(UnifiedTransaction {
         signature: signature.to_string(),
         slot,
         transaction_index,
         block_time,
         signers,
-        error: static_meta
+        error: geyser_meta
             .err
             .as_ref()
             .map(|e| String::from_utf8_lossy(&e.err).to_string()),
         account_keys: full_account_keys_list,
-        formatted_instructions: format_transaction(static_tx, static_meta),
-        logs: static_meta.log_messages.clone(),
+        formatted_instructions: format_transaction(&versioned_tx, &geyser_meta),
+        logs: geyser_meta.log_messages.clone(),
         pre_balances,
         post_balances,
         token_decimals,
