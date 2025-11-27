@@ -60,7 +60,7 @@ pub fn format_transaction(
         .iter()
         .enumerate()
         .filter(|(_, log)| log.ends_with(" invoke [1]"))
-            .map(|(i, _)| i)
+        .map(|(i, _)| i)
         .collect();
 
     top_level_invoke_indices.push(log_messages.len());
@@ -68,7 +68,7 @@ pub fn format_transaction(
     for (i, top_ix) in top_level_ixs.iter().enumerate() {
         let inners: Vec<Cow<'static, InnerInstruction>> = inner_ix_map
             .get(&(i as u8))
-            .map_or_else(Vec::new, |ixs| ixs.iter().cloned().map(Into::into).collect());
+            .map_or_else(Vec::new, |ixs| ixs.iter().cloned().map(Cow::Owned).collect());
 
         let log_start_index = top_level_invoke_indices
             .get(i)
@@ -84,7 +84,7 @@ pub fn format_transaction(
             .unwrap_or(&[])
             .iter()
             .cloned()
-            .map(Into::into)
+            .map(Cow::Owned)
             .collect();
 
         formatted_instructions.push(FormattedInstruction {

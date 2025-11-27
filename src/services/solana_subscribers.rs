@@ -327,6 +327,9 @@ fn convert_grpc_to_unified(
         }
     }
 
+    let formatted_instructions = format_transaction(&versioned_tx, &meta);
+    let logs = meta.log_messages.clone();
+
     Ok(UnifiedTransaction {
         signature: signature.to_string(),
         slot: geyser_tx.slot,
@@ -338,8 +341,8 @@ fn convert_grpc_to_unified(
             .as_ref()
             .map(|e| String::from_utf8_lossy(&e.err).to_string()),
         account_keys,
-        formatted_instructions: format_transaction(&versioned_tx, &meta),
-        logs: meta.log_messages.clone(),
+        formatted_instructions,
+        logs,
         pre_balances,
         post_balances,
         token_decimals,
@@ -1395,6 +1398,9 @@ fn convert_car_tx_to_unified(
         }
     }
 
+    let formatted_instructions = format_transaction(&versioned_tx, &geyser_meta);
+    let logs = geyser_meta.log_messages.clone();
+
     Ok(UnifiedTransaction {
         signature: signature.to_string(),
         slot,
@@ -1406,8 +1412,8 @@ fn convert_car_tx_to_unified(
             .as_ref()
             .map(|e| String::from_utf8_lossy(&e.err).to_string()),
         account_keys: full_account_keys_list,
-        formatted_instructions: format_transaction(&versioned_tx, &geyser_meta),
-        logs: geyser_meta.log_messages.clone(),
+        formatted_instructions,
+        logs,
         pre_balances,
         post_balances,
         token_decimals,
