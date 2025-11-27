@@ -455,9 +455,12 @@ impl WalletAggregator {
                     (holding.history_bought_amount - sold_amount).max(0.0);
                 holding.history_bought_cost_sol =
                     (holding.history_bought_cost_sol - cost_basis_sol).max(0.0);
-                if holding.history_bought_cost_sol > 0.0 {
+                // PnL ratio should be based on the cost of sold lots, not the remaining basis.
+                let realized_cost_sol =
+                    (holding.history_sold_income_sol - holding.realized_profit_sol).max(0.0);
+                if realized_cost_sol > 0.0 {
                     holding.realized_profit_pnl =
-                        (holding.realized_profit_sol / holding.history_bought_cost_sol) as f32;
+                        (holding.realized_profit_sol / realized_cost_sol) as f32;
                 }
 
                 // Holding period update: only when selling from an existing position.
