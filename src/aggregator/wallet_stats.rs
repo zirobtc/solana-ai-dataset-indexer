@@ -935,17 +935,9 @@ impl WalletAggregator {
             insert_rows(
                 &self.db_client,
                 "wallet_profiles",
-                updated_profiles.clone(),
-                "Wallet Aggregator",
-                "profiles",
-            )
-            .await?;
-            insert_rows(
-                &self.db_client,
-                "wallet_profiles_latest",
                 updated_profiles,
                 "Wallet Aggregator",
-                "profiles_latest",
+                "profiles",
             )
             .await?;
         }
@@ -1013,10 +1005,8 @@ impl WalletAggregator {
                         .query(
                             "
                         SELECT *
-                        FROM wallet_profiles_latest
+                        FROM wallet_profiles
                         WHERE wallet_address IN ?
-                        ORDER BY wallet_address, updated_at DESC
-                        LIMIT 1 BY wallet_address
                     ",
                         )
                         .bind(chunk)
@@ -1068,8 +1058,6 @@ impl WalletAggregator {
                         SELECT *
                         FROM wallet_profile_metrics_latest
                         WHERE wallet_address IN ?
-                        ORDER BY wallet_address, updated_at DESC
-                        LIMIT 1 BY wallet_address
                     ",
                         )
                         .bind(chunk)
@@ -1138,8 +1126,6 @@ impl WalletAggregator {
                         SELECT *
                         FROM wallet_holdings_latest
                         WHERE (wallet_address, mint_address) IN ?
-                        ORDER BY wallet_address, mint_address, updated_at DESC
-                        LIMIT 1 BY wallet_address, mint_address
                     ",
                         )
                         .bind(chunk)
