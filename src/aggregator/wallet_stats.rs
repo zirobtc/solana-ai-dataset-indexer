@@ -935,9 +935,17 @@ impl WalletAggregator {
             insert_rows(
                 &self.db_client,
                 "wallet_profiles",
-                updated_profiles,
+                updated_profiles.clone(),
                 "Wallet Aggregator",
                 "profiles",
+            )
+            .await?;
+            insert_rows(
+                &self.db_client,
+                "wallet_profiles_latest",
+                updated_profiles,
+                "Wallet Aggregator",
+                "profiles_latest",
             )
             .await?;
         }
@@ -1005,7 +1013,7 @@ impl WalletAggregator {
                         .query(
                             "
                         SELECT *
-                        FROM wallet_profiles
+                        FROM wallet_profiles_latest
                         WHERE wallet_address IN ?
                         ORDER BY wallet_address, updated_at DESC
                         LIMIT 1 BY wallet_address

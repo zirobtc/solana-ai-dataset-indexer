@@ -616,29 +616,11 @@ impl TokenAggregator {
         if keys.is_empty() {
             return Ok(HashMap::new());
         }
-        // Use argMax to get the latest version of each token, which is the
-        // correct approach for MergeTree tables instead of FINAL.
         let query_str = "
             SELECT
-                argMax(updated_at, updated_at) as updated_at,
-                argMax(created_at, updated_at) as created_at,
-                token_address,
-                argMax(name, updated_at) as name,
-                argMax(symbol, updated_at) as symbol,
-                argMax(token_uri, updated_at) as token_uri,
-                argMax(decimals, updated_at) as decimals,
-                argMax(creator_address, updated_at) as creator_address,
-                argMax(pool_addresses, updated_at) as pool_addresses,
-                argMax(launchpad, updated_at) as launchpad,
-                argMax(protocol, updated_at) as protocol,
-                argMax(total_supply, updated_at) as total_supply,
-                argMax(is_mutable, updated_at) as is_mutable,
-                argMax(update_authority, updated_at) as update_authority,
-                argMax(mint_authority, updated_at) as mint_authority,
-                argMax(freeze_authority, updated_at) as freeze_authority
-            FROM tokens
+                *
+            FROM tokens_latest
             WHERE token_address IN ?
-            GROUP BY token_address
         ";
 
         let mut statics = HashMap::new();
@@ -796,12 +778,22 @@ impl TokenAggregator {
         insert_rows(
             &self.db_client,
             "tokens",
-            updated_tokens,
+            updated_tokens.clone(),
             "Token Aggregator",
             "tokens",
         )
         .await
         .with_context(|| "Failed to persist token data to ClickHouse")?;
+
+        insert_rows(
+            &self.db_client,
+            "tokens_latest",
+            updated_tokens,
+            "Token Aggregator",
+            "tokens_latest",
+        )
+        .await
+        .with_context(|| "Failed to persist token snapshot data to ClickHouse")?;
 
         insert_rows(
             &self.db_client,
