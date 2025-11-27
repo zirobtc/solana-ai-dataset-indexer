@@ -775,10 +775,11 @@ impl LinkGraph {
         }
 
         let holder_check_query = "
-            SELECT token_address, argMax(unique_holders, updated_at) AS unique_holders
-            FROM token_metrics
+            SELECT token_address, unique_holders
+            FROM token_metrics_latest
             WHERE token_address IN ?
-            GROUP BY token_address
+            ORDER BY token_address, updated_at DESC
+            LIMIT 1 BY token_address
         ";
         let mut holder_infos: Vec<TokenHolderInfo> = Vec::new();
         let unique_mints_vec: Vec<_> = unique_mints.iter().cloned().collect();
@@ -2109,10 +2110,11 @@ impl LinkGraph {
         }
 
         let query = "
-            SELECT token_address, argMax(ath_price_usd, updated_at) AS ath_price_usd
-            FROM token_metrics
+            SELECT token_address, ath_price_usd
+            FROM token_metrics_latest
             WHERE token_address IN ?
-            GROUP BY token_address
+            ORDER BY token_address, updated_at DESC
+            LIMIT 1 BY token_address
         ";
 
         for chunk in token_addresses.chunks(cfg.ath_fetch_chunk_size.max(1)) {

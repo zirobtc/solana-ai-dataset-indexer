@@ -988,9 +988,11 @@ impl WalletAggregator {
                         .db_client
                         .query(
                             "
-                        SELECT * FROM wallet_profiles
+                        SELECT *
+                        FROM wallet_profiles
                         WHERE wallet_address IN ?
-                        ORDER BY updated_at DESC
+                        ORDER BY wallet_address, updated_at DESC
+                        LIMIT 1 BY wallet_address
                     ",
                         )
                         .bind(chunk)
@@ -1039,9 +1041,11 @@ impl WalletAggregator {
                         .db_client
                         .query(
                             "
-                        SELECT * FROM wallet_profile_metrics
+                        SELECT *
+                        FROM wallet_profile_metrics_latest
                         WHERE wallet_address IN ?
-                        ORDER BY updated_at DESC
+                        ORDER BY wallet_address, updated_at DESC
+                        LIMIT 1 BY wallet_address
                     ",
                         )
                         .bind(chunk)
@@ -1107,9 +1111,11 @@ impl WalletAggregator {
                         .db_client
                         .query(
                             "
-                        SELECT * FROM wallet_holdings
+                        SELECT *
+                        FROM wallet_holdings_latest
                         WHERE (wallet_address, mint_address) IN ?
-                        ORDER BY updated_at DESC
+                        ORDER BY wallet_address, mint_address, updated_at DESC
+                        LIMIT 1 BY wallet_address, mint_address
                     ",
                         )
                         .bind(chunk)

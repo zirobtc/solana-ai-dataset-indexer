@@ -601,7 +601,10 @@ async fn main() -> Result<()> {
     // --- Client Initialization ---
     let client_with_url = Client::default()
         .with_url(&db_url)
-        .with_option("max_query_size", "100000000");
+        .with_option("max_bytes_before_external_sort", "1000000000")     // 3 GB
+        .with_option("max_bytes_before_external_group_by", "1000000000") // 3 GB
+        .with_option("max_threads", "4") // Good limitation for concurrency
+        .with_option("max_memory_usage", "0"); // 0 = Unlimited (let the spill settings handle safety)
     let db_client = client_with_url.with_user("default").with_password("");
 
     db_client.query("SELECT 1").fetch_one::<u8>().await?;

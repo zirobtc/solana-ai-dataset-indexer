@@ -675,16 +675,11 @@ impl TokenAggregator {
 
         let query_str = "
             SELECT
-                argMax(updated_at, updated_at) as updated_at,
-                token_address,
-                argMax(total_volume_usd, updated_at) as total_volume_usd,
-                argMax(total_buys, updated_at) as total_buys,
-                argMax(total_sells, updated_at) as total_sells,
-                argMax(unique_holders, updated_at) as unique_holders,
-                argMax(ath_price_usd, updated_at) as ath_price_usd
-            FROM token_metrics
+                *
+            FROM token_metrics_latest
             WHERE token_address IN ?
-            GROUP BY token_address
+            ORDER BY token_address, updated_at DESC
+            LIMIT 1 BY token_address
         ";
 
         let mut metrics = HashMap::new();
