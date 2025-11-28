@@ -18,6 +18,7 @@ use once_cell::sync::Lazy;
 use serde::Deserialize;
 use solana_sdk::native_token::LAMPORTS_PER_SOL;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -185,8 +186,39 @@ impl LinkGraph {
             write_lock: Mutex::new(()),
             trade_cache: Arc::new(Mutex::new(HashMap::new())),
             write_sender,
-            writer_depth,
+        writer_depth,
         })
+    }
+
+    async fn with_ch_retry<T, F, Fut>(&self, mut op: F, label: &str) -> Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        let cfg = &*LINK_GRAPH_CONFIG;
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            match op().await {
+                Ok(res) => return Ok(res),
+                Err(e) => {
+                    if attempts >= cfg.ch_retry_attempts {
+                        return Err(anyhow!(
+                            "[LinkGraph] {} failed after {} attempts: {}",
+                            label,
+                            attempts,
+                            e
+                        ));
+                    }
+                    let backoff = cfg.ch_retry_backoff_ms * attempts as u64;
+                    eprintln!(
+                        "[LinkGraph] ⚠️ {} retry {}/{} after {}ms: {}",
+                        label, attempts, cfg.ch_retry_attempts, backoff, e
+                    );
+                    sleep(Duration::from_millis(backoff)).await;
+                }
+            }
+        }
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -786,12 +818,18 @@ impl LinkGraph {
 
         for chunk in unique_mints_vec.chunks(cfg.chunk_size_large) {
             let mut chunk_results = self
-                .db_client
-                .query(holder_check_query)
-                .bind(chunk) // Bind the smaller chunk
-                .fetch_all()
-                .await
-                .map_err(|e| anyhow!("DB ERROR in Snipes-HolderCheck chunk: {}", e))?;
+                .with_ch_retry(
+                    || async {
+                        self.db_client
+                            .query(holder_check_query)
+                            .bind(chunk)
+                            .fetch_all()
+                            .await
+                            .map_err(anyhow::Error::from)
+                    },
+                    "Snipes-HolderCheck chunk",
+                )
+                .await?;
             holder_infos.append(&mut chunk_results);
         }
 
@@ -1190,12 +1228,20 @@ impl LinkGraph {
         let mint_chunk_small = cfg.chunk_size_mint_small;
 
         for chunk in unique_mints.chunks(mint_chunk_small) {
-            let mut cursor = self
-                .db_client
-                .query(mint_query)
-                .bind(chunk)
-                .fetch::<MintCheck>()?;
-            while let Some(mint_row) = cursor.next().await? {
+            let chunk_rows: Vec<MintCheck> = self
+                .with_ch_retry(
+                    || async {
+                        self.db_client
+                            .query(mint_query)
+                            .bind(chunk)
+                            .fetch_all()
+                            .await
+                            .map_err(anyhow::Error::from)
+                    },
+                    "TopTrader mint check chunk",
+                )
+                .await?;
+            for mint_row in chunk_rows {
                 fully_tracked_mints.insert(mint_row.mint_address);
             }
         }
@@ -1376,12 +1422,20 @@ impl LinkGraph {
 
         let mut fully_tracked_mints = HashSet::new();
         for chunk in unique_mints_in_batch.chunks(cfg.chunk_size_mint_large) {
-            let mut cursor = self
-                .db_client
-                .query(mint_query)
-                .bind(chunk)
-                .fetch::<MintCheck>()?;
-            while let Some(mint_row) = cursor.next().await? {
+            let chunk_rows: Vec<MintCheck> = self
+                .with_ch_retry(
+                    || async {
+                        self.db_client
+                            .query(mint_query)
+                            .bind(chunk)
+                            .fetch_all()
+                            .await
+                            .map_err(anyhow::Error::from)
+                    },
+                    "Whale mint check chunk",
+                )
+                .await?;
+            for mint_row in chunk_rows {
                 fully_tracked_mints.insert(mint_row.mint_address);
             }
         }
@@ -1408,29 +1462,48 @@ impl LinkGraph {
         let token_query = "SELECT token_address, total_supply, decimals FROM tokens FINAL WHERE token_address IN ?";
 
         // --- RE-INTRODUCED CHUNKING for the token pre-filter ---
-        const TOKEN_CHUNK_SIZE: usize = 3000;
         let mut context_map: HashMap<String, (u64, f64, u8)> = HashMap::new();
 
         for chunk in confident_mints.chunks(cfg.chunk_size_token) {
-            let chunk_results: Vec<TokenInfo> = self
-                .db_client
-                .query(token_query)
-                .bind(chunk)
-                .fetch_all()
-                .await
-                .map_err(|e| {
-                    anyhow!(
-                        "[WHALE_FAIL]: Token pre-filter query chunk failed. Error: {}",
-                        e
-                    )
-                })?;
-            for token in chunk_results {
-                if let Some(ath) = ath_map.get(&token.token_address) {
-                    if *ath >= cfg.ath_price_threshold_usd {
-                        context_map.insert(
-                            token.token_address,
-                            (token.total_supply, *ath, token.decimals),
+            let mut attempts = 0;
+            loop {
+                attempts += 1;
+                let result: Result<Vec<TokenInfo>> = self
+                    .db_client
+                    .query(token_query)
+                    .bind(chunk)
+                    .fetch_all()
+                    .await
+                    .map_err(anyhow::Error::from);
+
+                match result {
+                    Ok(chunk_results) => {
+                        for token in chunk_results {
+                            if let Some(ath) = ath_map.get(&token.token_address) {
+                                if *ath >= cfg.ath_price_threshold_usd {
+                                    context_map.insert(
+                                        token.token_address,
+                                        (token.total_supply, *ath, token.decimals),
+                                    );
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    Err(e) => {
+                        if attempts >= cfg.ch_retry_attempts {
+                            return Err(anyhow!(
+                                "[WHALE_FAIL]: Token pre-filter chunk failed after {} attempts: {}",
+                                attempts,
+                                e
+                            ));
+                        }
+                        let backoff = cfg.ch_retry_backoff_ms * attempts as u64;
+                        eprintln!(
+                            "[LinkGraph] ⚠️ Whale token pre-filter retry {}/{} after {}ms: {}",
+                            attempts, cfg.ch_retry_attempts, backoff, e
                         );
+                        sleep(Duration::from_millis(backoff)).await;
                     }
                 }
             }
@@ -1460,20 +1533,40 @@ impl LinkGraph {
         // --- RE-INTRODUCED CHUNKING for the main whale query ---
         let mut top_holders: Vec<WhaleInfo> = Vec::new();
         for chunk in tokens_to_query.chunks(cfg.chunk_size_token) {
-            let chunk_results = self
-                .db_client
-                .query(whales_query)
-                .bind(chunk)
-                .bind(cfg.whale_rank_threshold)
-                .fetch_all()
-                .await
-                .map_err(|e| {
-                    anyhow!(
-                        "[WHALE_FAIL]: Batched holder query chunk failed. Error: {}",
-                        e
-                    )
-                })?;
-            top_holders.extend(chunk_results);
+            let mut attempts = 0;
+            loop {
+                attempts += 1;
+                let result: Result<Vec<WhaleInfo>> = self
+                    .db_client
+                    .query(whales_query)
+                    .bind(chunk)
+                    .bind(cfg.whale_rank_threshold)
+                    .fetch_all()
+                    .await
+                    .map_err(anyhow::Error::from);
+
+                match result {
+                    Ok(chunk_results) => {
+                        top_holders.extend(chunk_results);
+                        break;
+                    }
+                    Err(e) => {
+                        if attempts >= cfg.ch_retry_attempts {
+                            return Err(anyhow!(
+                                "[WHALE_FAIL]: Holder query chunk failed after {} attempts: {}",
+                                attempts,
+                                e
+                            ));
+                        }
+                        let backoff = cfg.ch_retry_backoff_ms * attempts as u64;
+                        eprintln!(
+                            "[LinkGraph] ⚠️ Whale holder chunk retry {}/{} after {}ms: {}",
+                            attempts, cfg.ch_retry_attempts, backoff, e
+                        );
+                        sleep(Duration::from_millis(backoff)).await;
+                    }
+                }
+            }
         }
         // --- END CHUNKING ---
 
@@ -2164,7 +2257,18 @@ impl LinkGraph {
             wallet_address, mint_address
         );
         // Fetch the pre-calculated f32 value
-        let pnl_f32 = self.db_client.query(&q_str).fetch_one::<f32>().await?;
+        let pnl_f32 = self
+            .with_ch_retry(
+                || async {
+                    self.db_client
+                        .query(&q_str)
+                        .fetch_one::<f32>()
+                        .await
+                        .map_err(anyhow::Error::from)
+                },
+                "Fetch PNL",
+            )
+            .await?;
         // Cast to f64 for the return type
         Ok(pnl_f32 as f64)
     }
