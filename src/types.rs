@@ -594,7 +594,7 @@ impl WalletProfileMetricsRow {
     }
 }
 
-impl TokenStaticRow {
+ impl TokenStaticRow {
     pub fn new_from_mint(mint: &MintRow) -> Self {
         Self {
             updated_at: mint.timestamp,
@@ -612,7 +612,8 @@ impl TokenStaticRow {
             },
             launchpad: mint.protocol,
             protocol: mint.protocol,
-            total_supply: mint.initial_base_liquidity,
+            // TokenStaticRow.total_supply is meant to represent the mint supply, not the initial pool liquidity.
+            total_supply: mint.total_supply,
             is_mutable: mint.is_mutable,
             update_authority: mint.update_authority.clone(),
             mint_authority: mint.mint_authority.clone(),

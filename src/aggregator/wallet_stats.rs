@@ -26,6 +26,7 @@ use tokio::sync::mpsc;
 
 type ProfileCache = HashMap<String, WalletProfileEntry>;
 type HoldingsCache = HashMap<(String, String), WalletHoldingRow>;
+type HoldingsHistory = Vec<WalletHoldingRow>;
 
 static FUNDING_THRESHOLD_SOL: Lazy<f64> =
     Lazy::new(|| env_parse("WALLET_FUNDING_THRESHOLD_SOL", 0.003_f64));
@@ -266,11 +267,28 @@ impl WalletAggregator {
         let holding_keys_in_batch: Vec<(String, String)> = payloads
             .iter()
             .flat_map(|payload| match &payload.event {
-                EventType::Trade(trade) => vec![(trade.maker.clone(), trade.base_address.clone())],
-                EventType::Transfer(transfer) => vec![
-                    (transfer.source.clone(), transfer.mint_address.clone()),
-                    (transfer.destination.clone(), transfer.mint_address.clone()),
-                ],
+                EventType::Trade(trade) => {
+                    let mint_address = if trade.base_address != NATIVE_MINT {
+                        trade.base_address.clone()
+                    } else {
+                        trade.quote_address.clone()
+                    };
+                    if mint_address == NATIVE_MINT {
+                        vec![]
+                    } else {
+                        vec![(trade.maker.clone(), mint_address)]
+                    }
+                }
+                EventType::Transfer(transfer) => {
+                    if transfer.mint_address == NATIVE_MINT {
+                        vec![]
+                    } else {
+                        vec![
+                            (transfer.source.clone(), transfer.mint_address.clone()),
+                            (transfer.destination.clone(), transfer.mint_address.clone()),
+                        ]
+                    }
+                }
                 _ => Vec::new(),
             })
             .collect::<HashSet<_>>()
@@ -283,6 +301,7 @@ impl WalletAggregator {
 
         let mut profiles = self.fetch_profiles(&wallets_in_batch).await?;
         let mut holdings = self.fetch_holdings(&holding_keys_in_batch).await?;
+        let mut holdings_history: HoldingsHistory = Vec::new();
 
         let transfer_wallets: HashSet<String> = payloads
             .iter()
@@ -307,7 +326,13 @@ impl WalletAggregator {
             match &payload.event {
                 EventType::Trade(trade) => {
                     if let Err(err) = self
-                        .process_trade(trade, payload, &mut profiles, &mut holdings)
+                        .process_trade(
+                            trade,
+                            payload,
+                            &mut profiles,
+                            &mut holdings,
+                            &mut holdings_history,
+                        )
                         .await
                     {
                         println!(
@@ -321,6 +346,7 @@ impl WalletAggregator {
                     payload,
                     &mut profiles,
                     &mut holdings,
+                    &mut holdings_history,
                     &new_tags,
                 ),
                 EventType::Mint(mint) => self.process_mint(mint, &mut profiles),
@@ -328,7 +354,8 @@ impl WalletAggregator {
             }
         }
 
-        self.finalize_and_persist(profiles, holdings).await?;
+        self.finalize_and_persist(profiles, holdings, holdings_history)
+            .await?;
         Ok(())
     }
 
@@ -354,6 +381,7 @@ impl WalletAggregator {
         payload: &EventPayload,
         profiles: &mut ProfileCache,
         holdings: &mut HoldingsCache,
+        holdings_history: &mut HoldingsHistory,
     ) -> Result<()> {
         let entry = profiles
             .entry(trade.maker.clone())
@@ -361,22 +389,36 @@ impl WalletAggregator {
 
         let native_price = self.price_service.get_price(trade.timestamp).await;
 
-        let (holding_period_update, realized_profit_sol, realized_profit_usd) =
-            if trade.base_address != NATIVE_MINT {
-                let holding = holdings
-                    .entry((trade.maker.clone(), trade.base_address.clone()))
-                    .or_insert_with(|| {
-                        WalletHoldingRow::new(
-                            trade.maker.clone(),
-                            trade.base_address.clone(),
-                            trade.timestamp,
-                        )
-                    });
-                self.update_holding_from_trade(holding, trade, payload, native_price)
-                    .await?
+        let (holding_period_update, realized_profit_sol, realized_profit_usd) = {
+            let holding_mint = if trade.base_address != NATIVE_MINT {
+                trade.base_address.clone()
             } else {
-                (0.0, 0.0, 0.0)
+                trade.quote_address.clone()
             };
+
+            if holding_mint == NATIVE_MINT {
+                (0.0, 0.0, 0.0)
+            } else {
+                let holding = holdings
+                    .entry((trade.maker.clone(), holding_mint.clone()))
+                    .or_insert_with(|| {
+                        WalletHoldingRow::new(trade.maker.clone(), holding_mint, trade.timestamp)
+                    });
+
+                let result = if holding.mint_address == trade.base_address
+                    && trade.base_address != NATIVE_MINT
+                {
+                    self.update_holding_from_trade(holding, trade, payload, native_price)
+                        .await?
+                } else {
+                    self.update_holding_balance_only_from_payload(holding, trade, payload);
+                    (0.0, 0.0, 0.0)
+                };
+
+                holdings_history.push(holding.clone());
+                result
+            }
+        };
 
         self.update_profile_from_trade(
             entry,
@@ -477,12 +519,40 @@ impl WalletAggregator {
             }
         }
 
+        if let Some(post_balance) =
+            Self::post_token_balance_decimal(payload, &trade.base_address, &trade.maker)
+        {
+            holding.current_balance = post_balance;
+        }
         holding.updated_at = trade.timestamp;
         Ok((
             holding_period_update,
             realized_profit_sol,
             realized_profit_usd,
         ))
+    }
+
+    fn update_holding_balance_only_from_payload(
+        &self,
+        holding: &mut WalletHoldingRow,
+        trade: &TradeRow,
+        payload: &EventPayload,
+    ) {
+        if let Some(post_balance) =
+            Self::post_token_balance_decimal(payload, &holding.mint_address, &trade.maker)
+        {
+            holding.current_balance = post_balance;
+            if holding.current_balance > f64::EPSILON && holding.start_holding_at == 0 {
+                holding.start_holding_at = trade.timestamp;
+            }
+        }
+        holding.updated_at = trade.timestamp;
+    }
+
+    fn post_token_balance_decimal(payload: &EventPayload, mint: &str, wallet: &str) -> Option<f64> {
+        let amount = payload.balances.get(mint)?.get(wallet)?;
+        let decimals = payload.token_decimals.get(mint).cloned().unwrap_or(9);
+        Some(*amount as f64 / 10f64.powi(decimals as i32))
     }
 
     fn update_profile_from_trade(
@@ -789,6 +859,7 @@ impl WalletAggregator {
         payload: &EventPayload,
         profiles: &mut ProfileCache,
         holdings: &mut HoldingsCache,
+        holdings_history: &mut HoldingsHistory,
         new_tags: &HashMap<String, Vec<String>>, // ADD this parameter
     ) {
         let event_time = Utc
@@ -871,7 +942,10 @@ impl WalletAggregator {
             };
 
         let process_holding =
-            |wallet_address: &String, is_source: bool, holdings: &mut HoldingsCache| {
+            |wallet_address: &String,
+             is_source: bool,
+             holdings: &mut HoldingsCache,
+             holdings_history: &mut HoldingsHistory| {
                 if transfer.mint_address == NATIVE_MINT {
                     return;
                 }
@@ -893,13 +967,15 @@ impl WalletAggregator {
                     holding.current_balance = transfer.destination_balance;
                     holding.history_transfer_in += 1;
                 }
+
+                holdings_history.push(holding.clone());
             };
 
         process_wallet(&transfer.source, true, profiles);
-        process_holding(&transfer.source, true, holdings);
+        process_holding(&transfer.source, true, holdings, holdings_history);
         if transfer.source != transfer.destination {
             process_wallet(&transfer.destination, false, profiles);
-            process_holding(&transfer.destination, false, holdings);
+            process_holding(&transfer.destination, false, holdings, holdings_history);
         }
     }
     fn convert_to_sol(
@@ -926,6 +1002,7 @@ impl WalletAggregator {
         &self,
         profiles: ProfileCache,
         holdings: HoldingsCache,
+        holdings_history: HoldingsHistory,
     ) -> Result<()> {
         let mut updated_profiles = Vec::new();
         let mut updated_metrics = Vec::new();
@@ -966,21 +1043,31 @@ impl WalletAggregator {
             )
             .await?;
         }
-        let updated_holdings: Vec<WalletHoldingRow> = holdings.into_values().collect();
-        if !updated_holdings.is_empty() {
-            println!("[db] 💾 Flushing {} holdings...", updated_holdings.len());
+        if !holdings_history.is_empty() {
+            println!(
+                "[db] 💾 Flushing {} holdings history rows...",
+                holdings_history.len()
+            );
             insert_rows(
                 &self.db_client,
                 "wallet_holdings",
-                updated_holdings.clone(),
+                holdings_history,
                 "Wallet Aggregator",
                 "holdings",
             )
             .await?;
+        }
+
+        let updated_holdings_latest: Vec<WalletHoldingRow> = holdings.into_values().collect();
+        if !updated_holdings_latest.is_empty() {
+            println!(
+                "[db] 💾 Flushing {} latest holdings...",
+                updated_holdings_latest.len()
+            );
             insert_rows(
                 &self.db_client,
                 "wallet_holdings_latest",
-                updated_holdings,
+                updated_holdings_latest,
                 "Wallet Aggregator",
                 "holdings_latest",
             )
