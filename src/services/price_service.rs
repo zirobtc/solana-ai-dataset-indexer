@@ -1,6 +1,8 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use chrono::prelude::*;
+use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
 use serde::Deserialize;
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::env;
 use std::sync::Arc;
@@ -106,10 +108,76 @@ pub async fn price_updater_task(price_service: PriceService) -> Result<()> {
 
 // --- Helper Functions (No changes needed below) ---
 
+fn coingecko_base_url() -> String {
+    env::var("COINGECKO_BASE_URL").unwrap_or_else(|_| "https://api.coingecko.com/api/v3".to_string())
+}
+
+fn coingecko_client() -> Result<reqwest::Client> {
+    let mut headers = HeaderMap::new();
+
+    if let Ok(key) = env::var("COINGECKO_PRO_API_KEY") {
+        if !key.trim().is_empty() {
+            headers.insert(
+                "x-cg-pro-api-key",
+                HeaderValue::from_str(key.trim()).context("Invalid COINGECKO_PRO_API_KEY")?,
+            );
+        }
+    }
+
+    if let Ok(key) = env::var("COINGECKO_DEMO_API_KEY") {
+        if !key.trim().is_empty() {
+            headers.insert(
+                "x-cg-demo-api-key",
+                HeaderValue::from_str(key.trim()).context("Invalid COINGECKO_DEMO_API_KEY")?,
+            );
+        }
+    }
+
+    headers.insert(
+        USER_AGENT,
+        HeaderValue::from_static("solana-data-api/price_service"),
+    );
+
+    Ok(reqwest::Client::builder()
+        .default_headers(headers)
+        .timeout(Duration::from_secs(120))
+        .build()?)
+}
+
+fn body_snippet(body: &str) -> String {
+    const MAX: usize = 1000;
+    if body.len() <= MAX {
+        body.to_string()
+    } else {
+        format!("{}...(truncated)", &body[..MAX])
+    }
+}
+
+async fn get_text_checked(client: &reqwest::Client, url: &str) -> Result<String> {
+    let resp = client.get(url).send().await?;
+    let status = resp.status();
+    let text = resp.text().await?;
+    if !status.is_success() {
+        return Err(anyhow!(
+            "CoinGecko HTTP {} for {}. Body: {}",
+            status,
+            url,
+            body_snippet(&text)
+        ));
+    }
+    Ok(text)
+}
+
 /// Fetches the live price of SOL.
 async fn fetch_live_native_price() -> Result<f64> {
-    let url = "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd";
-    let response = reqwest::get(url).await?.json::<LivePriceResponse>().await?;
+    let client = coingecko_client()?;
+    let url = format!(
+        "{}/simple/price?ids=solana&vs_currencies=usd",
+        coingecko_base_url()
+    );
+    let text = get_text_checked(&client, &url).await?;
+    let response: LivePriceResponse = serde_json::from_str(&text)
+        .with_context(|| format!("Failed to parse CoinGecko live price response. Body: {}", body_snippet(&text)))?;
     Ok(response.solana.usd)
 }
 
@@ -131,15 +199,35 @@ async fn fetch_historical_prices() -> Result<BTreeMap<u32, f64>> {
         .unwrap()
         .timestamp();
 
+    let client = coingecko_client()?;
     let url = format!(
-        "https://api.coingecko.com/api/v3/coins/solana/market_chart/range?vs_currency=usd&from={}&to={}",
-        start_ts, end_ts
+        "{}/coins/solana/market_chart/range?vs_currency=usd&from={}&to={}",
+        coingecko_base_url(),
+        start_ts,
+        end_ts
     );
 
-    let response = reqwest::get(&url)
-        .await?
-        .json::<HistoricalPriceResponse>()
-        .await?;
+    let text = get_text_checked(&client, &url).await?;
+    let value: Value = serde_json::from_str(&text).with_context(|| {
+        format!(
+            "CoinGecko historical price endpoint returned non-JSON. Body: {}",
+            body_snippet(&text)
+        )
+    })?;
+
+    if value.get("prices").is_none() {
+        return Err(anyhow!(
+            "CoinGecko historical price response missing 'prices'. This often means auth/rate-limit/format change. Body: {}",
+            body_snippet(&text)
+        ));
+    }
+
+    let response: HistoricalPriceResponse = serde_json::from_value(value).with_context(|| {
+        format!(
+            "Failed to parse CoinGecko historical price response. Body: {}",
+            body_snippet(&text)
+        )
+    })?;
 
     let mut price_map = BTreeMap::new();
     for price_point in response.prices {

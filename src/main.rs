@@ -1,6 +1,6 @@
 #![allow(warnings)]
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use backoff::{ExponentialBackoff, future::retry};
 use clickhouse::Client;
 use dotenvy::dotenv;
@@ -572,7 +572,7 @@ async fn initialize_price_service() -> Result<(PriceService, JoinHandle<Result<(
     // PriceService::new() will block here until the API call is complete.
     let price_service = PriceService::new()
         .await
-        .expect("FATAL: Could not initialize Price Service.");
+        .context("FATAL: Could not initialize Price Service.")?;
 
     println!("[Main] ✅ Price Service is ready. Spawning updater task.");
 
